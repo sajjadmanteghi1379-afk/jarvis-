@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">J.A.R.V.I.S</string>
+    <string name="accessibility_service_description">Jarvis screen reading service — reads on-screen content so Jarvis can describe and summarize what is displayed.</string>
+</resources>

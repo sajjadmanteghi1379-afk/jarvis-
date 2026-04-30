@@ -1,0 +1,68 @@
+{
+  "project_info": {
+    "project_number": "438731039303",
+    "firebase_url": "https://jarvis-f7a93-default-rtdb.europe-west1.firebasedatabase.app",
+    "project_id": "jarvis-f7a93",
+    "storage_bucket": "jarvis-f7a93.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:438731039303:android:47b0a15c57b9b7c3460762",
+        "android_client_info": {
+          "package_name": "com.jarvis.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDe5OBP-HFpAPbkdzJxfE0592P3HgVLWXs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:438731039303:android:0553badf34afe760460762",
+        "android_client_info": {
+          "package_name": "com.jarvis.jarvis"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDe5OBP-HFpAPbkdzJxfE0592P3HgVLWXs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:438731039303:android:5bbfaaad6b7627c9460762",
+        "android_client_info": {
+          "package_name": "com.sajjad.jarvis"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDe5OBP-HFpAPbkdzJxfE0592P3HgVLWXs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

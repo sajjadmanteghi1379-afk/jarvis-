@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Dark background -->
+    <path
+        android:fillColor="#0A0A14"
+        android:pathData="M0,0 L108,0 L108,108 L0,108 Z" />
+
+    <!-- Outer glow ring -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1A4080"
+        android:strokeWidth="1"
+        android:pathData="M54,8 A46,46 0 1,1 53.99,8 Z" />
+
+    <!-- Middle ring -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#0055AA"
+        android:strokeWidth="1.5"
+        android:pathData="M54,14 A40,40 0 1,1 53.99,14 Z" />
+
+    <!-- Glow circle center -->
+    <path
+        android:fillColor="#0D2040"
+        android:pathData="M54,20 A34,34 0 1,1 53.99,20 Z" />
+
+    <!-- Inner bright ring -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#0077CC"
+        android:strokeWidth="2"
+        android:pathData="M54,22 A32,32 0 1,1 53.99,22 Z" />
+
+    <!-- Center bright spot -->
+    <path
+        android:fillColor="#003366"
+        android:pathData="M54,30 A24,24 0 1,1 53.99,30 Z" />
+
+    <!-- J letter -->
+    <path
+        android:fillColor="#00CFFF"
+        android:pathData="M50,35 L53,35 L53,52 Q53,57 48,57 Q45,57 44,55 L46,53 Q46.5,54.5 48,54.5 Q51,54.5 51,52 L51,37 L50,37 Z" />
+
+    <!-- dot after J -->
+    <path
+        android:fillColor="#00CFFF"
+        android:pathData="M54.5,54 A1.5,1.5 0 1,1 54.49,54 Z" />
+
+    <!-- A letter -->
+    <path
+        android:fillColor="#00CFFF"
+        android:pathData="M56,57 L58.5,35 L61,35 L63.5,57 L61.5,57 L61,53 L59,53 L58.5,57 Z M59.2,51 L60.8,51 L60,40 Z" />
+
+    <!-- dot after A -->
+    <path
+        android:fillColor="#00CFFF"
+        android:pathData="M64,54 A1.5,1.5 0 1,1 63.99,54 Z" />
+
+    <!-- Scan line decoration left -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#0055AA"
+        android:strokeWidth="0.5"
+        android:pathData="M30,45 L44,45" />
+
+    <!-- Scan line decoration right -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#0055AA"
+        android:strokeWidth="0.5"
+        android:pathData="M64,45 L78,45" />
+
+    <!-- Bottom bar -->
+    <path
+        android:fillColor="#005588"
+        android:pathData="M35,65 L73,65 L73,66 L35,66 Z" />
+
+    <!-- Corner accent top-left -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#003366"
+        android:strokeWidth="1.5"
+        android:pathData="M15,15 L25,15 L25,17 M15,15 L15,25 L17,25" />
+
+    <!-- Corner accent top-right -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#003366"
+        android:strokeWidth="1.5"
+        android:pathData="M93,15 L83,15 L83,17 M93,15 L93,25 L91,25" />
+
+    <!-- Corner accent bottom-left -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#003366"
+        android:strokeWidth="1.5"
+        android:pathData="M15,93 L25,93 L25,91 M15,93 L15,83 L17,83" />
+
+    <!-- Corner accent bottom-right -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#003366"
+        android:strokeWidth="1.5"
+        android:pathData="M93,93 L83,93 L83,91 M93,93 L93,83 L91,83" />
+
+</vector>

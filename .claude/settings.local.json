@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew assembleDebug)",
+      "PowerShell(python -c $astScript)",
+      "PowerShell(python -c \"import json; from graphify.extract import collect_files, extract; from pathlib import Path; detect=json.loads\\(Path\\('.graphify_detect.json'\\).read_text\\(\\)\\); code_files=[Path\\(f\\) for f in detect.get\\('files',{}\\).get\\('code',[]\\)]; result=extract\\(code_files\\) if code_files else {'nodes':[],'edges':[],'input_tokens':0,'output_tokens':0}; Path\\('.graphify_ast.json'\\).write_text\\(json.dumps\\(result,indent=2\\)\\); print\\('AST:',len\\(result['nodes']\\),'nodes,',len\\(result['edges']\\),'edges'\\)\")",
+      "PowerShell(python -c \"import json; from graphify.cache import check_semantic_cache; from pathlib import Path; detect=json.loads\\(Path\\('.graphify_detect.json'\\).read_text\\(\\)\\); all_files=[f for files in detect['files'].values\\(\\) for f in files]; cached_nodes,cached_edges,cached_hyperedges,uncached=check_semantic_cache\\(all_files\\); Path\\('.graphify_cached.json'\\).write_text\\(json.dumps\\({'nodes':cached_nodes,'edges':cached_edges,'hyperedges':cached_hyperedges}\\)\\) if cached_nodes or cached_edges or cached_hyperedges else None; Path\\('.graphify_uncached.txt'\\).write_text\\('\\\\n'.join\\(uncached\\)\\); print\\('Cache: ' + str\\(len\\(all_files\\)-len\\(uncached\\)\\) + ' files hit, ' + str\\(len\\(uncached\\)\\) + ' files need extraction'\\)\")",
+      "Bash(python *)",
+      "Bash(pip install *)",
+      "Bash(where java *)",
+      "Read(//c/Program Files/Android/Android Studio/jbr/bin/**)",
+      "Read(//c/Program Files/**)",
+      "Read(//c/Program Files/Android/Android Studio/**)",
+      "PowerShell(Get-Command *)",
+      "Bash(Remove-Item \"E:\\\\jarvis\\\\app\\\\src\\\\main\\\\res\\\\mipmap-anydpi-v26\\\\ic_launcher.xml\" -Force)",
+      "Bash(Remove-Item \"E:\\\\jarvis\\\\app\\\\src\\\\main\\\\res\\\\mipmap-anydpi-v26\\\\ic_launcher_round.xml\" -Force)",
+      "Bash(Remove-Item \"E:\\\\jarvis\\\\app\\\\src\\\\main\\\\res\\\\drawable\\\\ic_launcher_foreground.xml\" -Force)",
+      "Bash(Write-Host \"Deleted icon override files\")",
+      "Bash(JAVA_HOME=\"C:/Program Files/Java/jdk-26.0.1\" ./gradlew assembleDebug)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell($env:JAVA_HOME = \"C:\\\\Program Files\\\\Java\\\\jdk-26.0.1\"; cd \"E:\\\\jarvis\"; .\\\\gradlew.bat assembleDebug 2>&1 | Select-Object -Last 50)",
+      "PowerShell($env:JAVA_HOME = \"C:\\\\Program Files\\\\Java\\\\jdk-26.0.1\"; cd \"E:\\\\jarvis\"; .\\\\gradlew.bat assembleDebug --stacktrace 2>&1 | Select-Object -First 60)",
+      "PowerShell(where.exe java; [System.Environment]::GetEnvironmentVariable\\(\"JAVA_HOME\", \"Machine\"\\))",
+      "PowerShell(& \"E:\\\\android studio\\\\jbr\\\\bin\\\\java.exe\" -version 2>&1)",
+      "PowerShell([System.Environment]::SetEnvironmentVariable\\(\"JAVA_HOME\", \"E:\\\\android studio\\\\jbr\", \"Machine\"\\); Write-Host \"JAVA_HOME set permanently to E:\\\\android studio\\\\jbr\")",
+      "PowerShell([System.Environment]::SetEnvironmentVariable\\(\"JAVA_HOME\", \"E:\\\\android studio\\\\jbr\", \"User\"\\); Write-Host \"Done\")",
+      "PowerShell($env:JAVA_HOME = \"E:\\\\android studio\\\\jbr\"; cd \"E:\\\\jarvis\"; .\\\\gradlew.bat assembleDebug 2>&1 | Select-Object -Last 30)",
+      "PowerShell($env:JAVA_HOME = \"E:\\\\android studio\\\\jbr\"; cd E:\\\\jarvis; .\\\\gradlew.bat assembleDebug 2>&1)",
+      "PowerShell($env:JAVA_HOME = \"E:\\\\android studio\\\\jbr\"; .\\\\gradlew.bat assembleDebug 2>&1 | Select-Object -Last 200)",
+      "Read(//tmp/**)",
+      "Read(//c/Users/SAJJAD~1/AppData/Local/Temp/claude/E--jarvis/e2652eab-01da-4722-a816-5d8bb6df21d3/tasks/**)",
+      "PowerShell($env:JAVA_HOME = \"E:\\\\android studio\\\\jbr\"; cd E:\\\\jarvis; .\\\\gradlew.bat assembleDebug 2>&1 | Select-Object -Last 60)",
+      "PowerShell([System.Environment]::GetEnvironmentVariable\\(\"JAVA_HOME\", \"Machine\"\\))",
+      "PowerShell([System.Environment]::SetEnvironmentVariable\\(\"JAVA_HOME\", \"E:\\\\android studio\\\\jbr\", \"Machine\"\\); [System.Environment]::GetEnvironmentVariable\\(\"JAVA_HOME\", \"Machine\"\\))",
+      "PowerShell($env:JAVA_HOME = \"E:\\\\android studio\\\\jbr\"; cd E:\\\\jarvis; .\\\\gradlew.bat installDebug 2>&1)"
+    ]
+  }
+}
