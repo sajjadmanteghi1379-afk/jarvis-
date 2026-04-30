@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:background="@drawable/widget_bg"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/widget_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="JARVIS ONLINE"
+        android:textColor="#00CFFF"
+        android:textSize="9sp"
+        android:fontFamily="monospace"
+        android:gravity="center"
+        android:letterSpacing="0.15"/>
+
+    <TextView
+        android:id="@+id/widget_time"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="00:00"
+        android:textColor="#FFFFFF"
+        android:textSize="26sp"
+        android:fontFamily="monospace"
+        android:gravity="center"
+        android:layout_marginTop="2dp"/>
+
+    <TextView
+        android:id="@+id/widget_date"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Mon, 01 Jan"
+        android:textColor="#336699"
+        android:textSize="8sp"
+        android:fontFamily="monospace"
+        android:gravity="center"/>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="6dp"
+        android:layout_marginBottom="6dp"
+        android:background="#1A0077BB"/>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center">
+
+        <TextView
+            android:id="@+id/widget_battery"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="⚡ --%"
+            android:textColor="#00CFFF"
+            android:textSize="9sp"
+            android:fontFamily="monospace"
+            android:gravity="center"/>
+
+        <TextView
+            android:id="@+id/widget_events"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="◈ --"
+            android:textColor="#0077BB"
+            android:textSize="9sp"
+            android:fontFamily="monospace"
+            android:gravity="center"/>
+
+    </LinearLayout>
+
+</LinearLayout>
