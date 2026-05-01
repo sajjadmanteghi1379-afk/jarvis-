@@ -64,7 +64,7 @@ import kotlin.math.*
 import kotlin.system.exitProcess
 
 
-const val ANTHROPIC_API_KEY = "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"
+const val ANTHROPIC_API_KEY = "suck it "
 const val ELEVENLABS_API_KEY = "DISABLED"
 const val ELEVENLABS_VOICE_ID = "pNInz6obpgDQGcFmaJgB"
 const val FIREBASE_PATH = "/jarvis"
@@ -73,11 +73,27 @@ const val OPENWEATHER_API_KEY = "269c87831c17b789a8f00d0cc3a92fef"
 const val NEWSAPI_KEY = "eeb6840e13904b2b9a057b3866b1aff4"
 const val USER_CITY = "Budapest"
 const val USER_COUNTRY = "hu"
+const val CURRENT_AI_API_KEY = ANTHROPIC_API_KEY
 
 data class ChatMessage(
     val role: String,
     val content: String,
     val timestamp: String = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+)
+
+private enum class AiProvider { ANTHROPIC, OPENAI }
+
+private data class ResearchResult(
+    val success: Boolean,
+    val text: String = "",
+    val savedLocation: String = "",
+    val errorMessage: String = ""
+)
+
+private data class SaveResult(
+    val success: Boolean,
+    val location: String = "",
+    val errorMessage: String = ""
 )
 
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost {
@@ -88,6 +104,9 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
     private var mediaPlayer: MediaPlayer? = null
     private var isCurrentlySpeaking = false
     private var continuousListening = false
+    private var activityRecognizerListening = false
+    private var activityRecognizerStarting = false
+    private var lastActivityRecognizerResumeLogMs = 0L
     private var originalSystemVolume = 0
     private var originalNotificationVolume = 0
     private val database by lazy { FirebaseDatabase.getInstance() }
@@ -102,6 +121,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
     private var jarvisAgent: JarvisAgent? = null
     private var screenCaptureCallback: ((String) -> Unit)? = null
     private var pendingYesNoCallback: ((Boolean) -> Unit)? = null
+    private var pendingCalendarDraft: CalendarEventDraft? = null
 
     private val screenCaptureReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -464,24 +484,34 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
 
     private fun speakWithTTS(text: String, onDone: () -> Unit = {}) {
         isCurrentlySpeaking = true
-        // Stop mic immediately so Jarvis never hears its own voice
-        if (::speechRecognizer.isInitialized) speechRecognizer.stopListening()
+        if (::speechRecognizer.isInitialized) {
+            try { speechRecognizer.cancel() } catch (_: Exception) {}
+        }
+        Log.e("JARVIS_CMD", "Recognizer paused")
         if (!isTtsReady) {
             CoroutineScope(Dispatchers.Main).launch { isCurrentlySpeaking = false; onDone() }
             return
         }
         val uttId = "jarvis_${System.currentTimeMillis()}"
         tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
-            override fun onStart(uid: String?) {}
+            override fun onStart(uid: String?) {
+                Log.e("JARVIS_CMD", "TTS started")
+            }
             override fun onDone(uid: String?) {
                 CoroutineScope(Dispatchers.Main).launch {
-                    delay(400)
+                    delay(1000)
                     isCurrentlySpeaking = false
+                    Log.e("JARVIS_CMD", "TTS stopped")
                     onDone()
                 }
             }
             override fun onError(uid: String?) {
-                CoroutineScope(Dispatchers.Main).launch { isCurrentlySpeaking = false; onDone() }
+                CoroutineScope(Dispatchers.Main).launch {
+                    delay(1000)
+                    isCurrentlySpeaking = false
+                    Log.e("JARVIS_CMD", "TTS stopped")
+                    onDone()
+                }
             }
         })
         tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, uttId)
@@ -532,9 +562,18 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
     }
 
     private fun startListeningInternal(onResult: (String) -> Unit, onError: () -> Unit) {
+        if (isCurrentlySpeaking) {
+            Log.e("JARVIS_CMD", "Recognizer start skipped while speaking")
+            return
+        }
+        if (activityRecognizerListening || activityRecognizerStarting) {
+            Log.e("JARVIS_CMD", "Recognizer start skipped; already listening")
+            return
+        }
         if (!SpeechRecognizer.isRecognitionAvailable(this)) { onError(); return }
         try {
             if (::speechRecognizer.isInitialized) speechRecognizer.destroy()
+            activityRecognizerListening = false
             speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -546,6 +585,12 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
             }
             speechRecognizer.setRecognitionListener(object : RecognitionListener {
                 override fun onResults(results: Bundle?) {
+                    activityRecognizerListening = false
+                    activityRecognizerStarting = false
+                    if (isCurrentlySpeaking) {
+                        Log.e("JARVIS_CMD", "Ignoring recognition result while speaking")
+                        return
+                    }
                     val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     if (!matches.isNullOrEmpty() && matches[0].isNotBlank()) {
                         val raw = matches[0]
@@ -574,20 +619,37 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                     }
                 }
                 override fun onError(error: Int) {
+                    activityRecognizerListening = false
+                    activityRecognizerStarting = false
+                    if (isCurrentlySpeaking) {
+                        Log.e("JARVIS_CMD", "Ignoring recognition error while speaking: $error")
+                        return
+                    }
                     if (continuousListening) CoroutineScope(Dispatchers.Main).launch {
                         delay(500); if (continuousListening) startListeningInternal(onResult, onError)
                     }
                 }
-                override fun onReadyForSpeech(params: Bundle?) {}
+                override fun onReadyForSpeech(params: Bundle?) {
+                    activityRecognizerListening = true
+                    activityRecognizerStarting = false
+                }
                 override fun onBeginningOfSpeech() {}
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
+                override fun onEndOfSpeech() { activityRecognizerListening = false; activityRecognizerStarting = false }
                 override fun onPartialResults(partialResults: Bundle?) {}
                 override fun onEvent(eventType: Int, params: Bundle?) {}
             })
+            activityRecognizerStarting = true
             speechRecognizer.startListening(intent)
+            val now = System.currentTimeMillis()
+            if (now - lastActivityRecognizerResumeLogMs > 1500L) {
+                Log.e("JARVIS_CMD", "Recognizer resumed")
+                lastActivityRecognizerResumeLogMs = now
+            }
         } catch (e: Exception) {
+            activityRecognizerListening = false
+            activityRecognizerStarting = false
             if (continuousListening) CoroutineScope(Dispatchers.Main).launch {
                 delay(1000); if (continuousListening) startListeningInternal(onResult, onError)
             }
@@ -597,6 +659,9 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
     private fun stopListening() {
         continuousListening = false
         if (::speechRecognizer.isInitialized) { speechRecognizer.stopListening(); speechRecognizer.destroy() }
+        activityRecognizerListening = false
+        activityRecognizerStarting = false
+        Log.e("JARVIS_CMD", "Recognizer paused")
     }
 
     private fun openApp(packageName: String): Boolean {
@@ -792,24 +857,9 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
     }
 
     private fun createCalendarEventDirect(title: String, startMs: Long, endMs: Long): Boolean {
-        var calId = 1L
-        try {
-            val c = contentResolver.query(CalendarContract.Calendars.CONTENT_URI,
-                arrayOf(CalendarContract.Calendars._ID), null, null, null)
-            c?.use { if (it.moveToFirst()) calId = it.getLong(0) }
-        } catch (e: Exception) { android.util.Log.e("JARVIS_CMD", "CalendarId fetch error: ${e.message}") }
-        return try {
-            val values = ContentValues().apply {
-                put(CalendarContract.Events.CALENDAR_ID, calId)
-                put(CalendarContract.Events.TITLE, title)
-                put(CalendarContract.Events.DTSTART, startMs)
-                put(CalendarContract.Events.DTEND, endMs)
-                put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
-            }
-            val uri = contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
-            android.util.Log.e("JARVIS_CMD", "Calendar event created: $uri")
-            uri != null
-        } catch (e: Exception) { android.util.Log.e("JARVIS_CMD", "Calendar insert error: ${e.message}"); false }
+        val result = CalendarActionHandler(this).addCalendarEvent(title, startMs, endMs)
+        android.util.Log.e("JARVIS_CMD", "Calendar event create result: ${result.success} ${result.message} ${result.eventUri}")
+        return result.success
     }
 
     private fun deleteCalendarEvent(titleQuery: String?, hour: Int?, minute: Int?): Boolean {
@@ -893,7 +943,64 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
         .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
         .build()
 
-    private suspend fun researchTopic(topic: String, outputMode: String): String = withContext(Dispatchers.IO) {
+    private fun currentAiProvider(): AiProvider {
+        return if (CURRENT_AI_API_KEY.trim().startsWith("sk-ant-")) AiProvider.ANTHROPIC else AiProvider.OPENAI
+    }
+
+    private fun executeAiTextRequest(
+        operation: String,
+        anthropicBody: JSONObject,
+        openAiBody: JSONObject
+    ): String? {
+        val key = CURRENT_AI_API_KEY.trim()
+        if (key.isEmpty()) {
+            Log.e("JARVIS_CMD", "$operation: AI API key is empty")
+            return null
+        }
+
+        val provider = currentAiProvider()
+        Log.e("JARVIS_CMD", "$operation: AI provider=$provider")
+        val request = when (provider) {
+            AiProvider.ANTHROPIC -> Request.Builder()
+                .url("https://api.anthropic.com/v1/messages")
+                .addHeader("Content-Type", "application/json")
+                .addHeader("x-api-key", key)
+                .addHeader("anthropic-version", "2023-06-01")
+                .post(anthropicBody.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            AiProvider.OPENAI -> Request.Builder()
+                .url("https://api.openai.com/v1/chat/completions")
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Authorization", "Bearer $key")
+                .post(openAiBody.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+        }
+
+        val response = researchClient.newCall(request).execute()
+        val responseBody = response.body?.string().orEmpty()
+        if (!response.isSuccessful) {
+            Log.e("JARVIS_CMD", "$operation failed HTTP ${response.code}: ${responseBody.take(1200)}")
+            return null
+        }
+        if (responseBody.isBlank()) {
+            Log.e("JARVIS_CMD", "$operation failed: empty response body")
+            return null
+        }
+
+        return try {
+            when (provider) {
+                AiProvider.ANTHROPIC -> JSONObject(responseBody).getJSONArray("content")
+                    .getJSONObject(0).getString("text")
+                AiProvider.OPENAI -> JSONObject(responseBody).getJSONArray("choices")
+                    .getJSONObject(0).getJSONObject("message").getString("content")
+            }.replace("**", "").replace("*", "").trim()
+        } catch (e: Exception) {
+            Log.e("JARVIS_CMD", "$operation parse failed: ${e.message}; body=${responseBody.take(1200)}")
+            null
+        }
+    }
+
+    private suspend fun researchTopic(topic: String, outputMode: String): ResearchResult = withContext(Dispatchers.IO) {
         try {
             android.util.Log.e("JARVIS_CMD", "RESEARCH: topic='$topic' mode='$outputMode'")
 
@@ -911,14 +1018,14 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                         val wikiResponse = researchClient.newCall(wikiRequest).execute()
                         val code = wikiResponse.code
                         android.util.Log.e("JARVIS_CMD", "RESEARCH: Wikipedia code=$code")
+                        val body = wikiResponse.body?.string() ?: ""
                         if (wikiResponse.isSuccessful) {
-                            val body = wikiResponse.body?.string() ?: ""
                             val json = JSONObject(body)
                             val wikiText = json.optString("extract", "")
                             android.util.Log.e("JARVIS_CMD", "RESEARCH: Wikipedia got ${wikiText.length} chars")
                             wikiText.take(1500)
                         } else {
-                            android.util.Log.e("JARVIS_CMD", "RESEARCH: Wikipedia failed code=$code")
+                            android.util.Log.e("JARVIS_CMD", "RESEARCH: Wikipedia failed HTTP $code: ${body.take(500)}")
                             ""
                         }
                     } catch (e: Exception) {
@@ -935,6 +1042,10 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                                 .build()
                         ).execute()
                         val body = resp.body?.string() ?: ""
+                        if (!resp.isSuccessful) {
+                            android.util.Log.e("JARVIS_CMD", "RESEARCH: DDG failed HTTP ${resp.code}: ${body.take(500)}")
+                            return@async ""
+                        }
                         val json = JSONObject(body)
                         val abstract = json.optString("Abstract", "")
                         val answer = json.optString("Answer", "")
@@ -952,33 +1063,36 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                 if (wikiText.isNotEmpty()) append("WIKIPEDIA:\n$wikiText\n\n")
                 if (ddgText.isNotEmpty()) append("DUCKDUCKGO INSTANT ANSWER:\n$ddgText\n\n")
             }
+            if (sourceMaterial.isBlank()) {
+                Log.e("JARVIS_CMD", "RESEARCH failed: no web source returned usable text")
+                return@withContext ResearchResult(false, errorMessage = "No web source returned usable text")
+            }
 
             val prompt = """Here is Wikipedia: ${if (wikiText.isNotEmpty()) wikiText else "(not available)"}. Here is DuckDuckGo: ${if (ddgText.isNotEmpty()) ddgText else "(not available)"}. Synthesize into comprehensive report on "$topic" with sections: Overview, Key Concepts, Recent Developments, Practical Applications, Sources Cited. Minimum 600 words. Be detailed and professional."""
 
             android.util.Log.e("JARVIS_CMD", "RESEARCH: sending ${prompt.length} chars to Claude")
 
-            val body = JSONObject().apply {
+            val anthropicBody = JSONObject().apply {
                 put("model", "claude-sonnet-4-6")
                 put("max_tokens", 3000)
                 put("messages", JSONArray().apply {
                     put(JSONObject().apply { put("role", "user"); put("content", prompt) })
                 })
             }
+            val openAiBody = JSONObject().apply {
+                put("model", "gpt-4o-mini")
+                put("max_tokens", 3000)
+                put("messages", JSONArray().apply {
+                    put(JSONObject().apply { put("role", "user"); put("content", prompt) })
+                })
+            }
 
-            val response = researchClient.newCall(
-                Request.Builder()
-                    .url("https://api.anthropic.com/v1/messages")
-                    .addHeader("Content-Type", "application/json")
-                    .addHeader("x-api-key", ANTHROPIC_API_KEY)
-                    .addHeader("anthropic-version", "2023-06-01")
-                    .addHeader("User-Agent", "JarvisAndroidApp/1.0 (sajjad.manteghi@gmail.com)")
-                    .post(body.toString().toRequestBody("application/json".toMediaType()))
-                    .build()
-            ).execute()
-
-            val respBody = response.body?.string() ?: return@withContext "Research failed, sir."
-            val researchText = JSONObject(respBody).getJSONArray("content")
-                .getJSONObject(0).getString("text")
+            val researchText = executeAiTextRequest("RESEARCH", anthropicBody, openAiBody)
+                ?: return@withContext ResearchResult(false, errorMessage = "AI request failed")
+            if (researchText.isBlank()) {
+                Log.e("JARVIS_CMD", "RESEARCH failed: output text is blank")
+                return@withContext ResearchResult(false, errorMessage = "Research output was empty")
+            }
 
             android.util.Log.e("JARVIS_CMD", "RESEARCH: Claude response=${researchText.length} chars")
 
@@ -999,18 +1113,22 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
             )
             val pdfContent = researchText + "\n\nSOURCES: ${sourcesList.joinToString(", ")}"
             android.util.Log.e("JARVIS_CMD", "RESEARCH: about to save PDF, content length = ${pdfContent.length}")
-            savePdf(topic, pdfContent)
-            researchText
+            val saveResult = savePdf(topic, pdfContent)
+            if (!saveResult.success) {
+                return@withContext ResearchResult(false, text = researchText, errorMessage = saveResult.errorMessage)
+            }
+            ResearchResult(true, text = researchText, savedLocation = saveResult.location)
         } catch (e: Exception) {
             android.util.Log.e("JARVIS_CMD", "Research coroutine error: ${e.message}")
-            "Research error, sir: ${e.message?.take(50)}"
+            ResearchResult(false, errorMessage = e.message ?: "Research failed")
         }
     }
 
-    private fun savePdf(topic: String, content: String) {
+    private fun savePdf(topic: String, content: String): SaveResult {
+        var pdfDoc: android.graphics.pdf.PdfDocument? = null
         try {
             android.util.Log.e("JARVIS_CMD", "PDF: savePdf() called")
-            val pdfDoc = android.graphics.pdf.PdfDocument()
+            pdfDoc = android.graphics.pdf.PdfDocument()
             val paint = android.graphics.Paint().apply {
                 textSize = 11f; color = android.graphics.Color.BLACK
             }
@@ -1073,13 +1191,24 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                     android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
                 if (uri != null) {
                     android.util.Log.e("JARVIS_CMD", "PDF: writing to path = $uri")
-                    resolver.openOutputStream(uri)?.use { out ->
+                    val stream = resolver.openOutputStream(uri)
+                        ?: return SaveResult(false, errorMessage = "MediaStore output stream was null")
+                    stream.use { out ->
                         pdfDoc.writeTo(out)
                     }
                     android.util.Log.e("JARVIS_CMD", "PDF: write complete")
-                    pdfDoc.close()
-                    android.util.Log.e("JARVIS_CMD", "PDF: MediaStore save success, uri=$uri")
-                    return
+                    val exists = try {
+                        resolver.openFileDescriptor(uri, "r")?.use { true } == true
+                    } catch (e: Exception) {
+                        Log.e("JARVIS_CMD", "PDF: MediaStore exists check failed: ${e.message}")
+                        false
+                    }
+                    if (exists) {
+                        android.util.Log.e("JARVIS_CMD", "Research saved to: $uri")
+                        return SaveResult(true, location = uri.toString())
+                    }
+                    Log.e("JARVIS_CMD", "PDF: MediaStore saved URI did not pass exists check")
+                    return SaveResult(false, errorMessage = "Saved URI did not pass exists check")
                 } else {
                     android.util.Log.e("JARVIS_CMD", "PDF: MediaStore insert returned null uri")
                 }
@@ -1091,10 +1220,17 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
             android.util.Log.e("JARVIS_CMD", "PDF: writing to path = ${file.absolutePath}")
             pdfDoc.writeTo(FileOutputStream(file))
             android.util.Log.e("JARVIS_CMD", "PDF: write complete")
-            pdfDoc.close()
-            android.util.Log.e("JARVIS_CMD", "RESEARCH: PDF saved to ${file.absolutePath}")
+            if (file.exists()) {
+                android.util.Log.e("JARVIS_CMD", "Research saved to: ${file.absolutePath}")
+                return SaveResult(true, location = file.absolutePath)
+            }
+            Log.e("JARVIS_CMD", "PDF: file.exists() returned false for ${file.absolutePath}")
+            return SaveResult(false, errorMessage = "File was not found after writing")
         } catch (e: Exception) {
             android.util.Log.e("JARVIS_CMD", "PDF: save failed with error = ${e.message}")
+            return SaveResult(false, errorMessage = e.message ?: "Save failed")
+        } finally {
+            try { pdfDoc?.close() } catch (_: Exception) {}
         }
     }
 
@@ -1326,6 +1462,32 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
         val lower = input.lowercase().trim()
         android.util.Log.e("JARVIS_CMD", "Lowered: '$lower'")
 
+        if (pendingCalendarDraft != null) {
+            val actionHandler = CalendarActionHandler(this)
+            val draft = actionHandler.mergeDraft(pendingCalendarDraft, input)
+            val parsed = actionHandler.toParsedEvent(draft)
+            if (parsed == null) {
+                pendingCalendarDraft = draft
+                onResponse(actionHandler.followUpQuestion(draft))
+                return true
+            }
+            pendingCalendarDraft = null
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_CALENDAR)
+                != PackageManager.PERMISSION_GRANTED) {
+                onResponse("I need calendar permission to create events, sir.")
+                return true
+            }
+            onResponse("Creating the event, sir.")
+            CoroutineScope(Dispatchers.IO).launch {
+                val result = CalendarActionHandler(this@MainActivity)
+                    .addCalendarEvent(parsed.title, parsed.startTime, parsed.endTime, parsed.location)
+                withContext(Dispatchers.Main) {
+                    speakText(if (result.success) "Your event has been added" else "Couldn't add the event sir. ${result.message}")
+                }
+            }
+            return true
+        }
+
         // ── SHARED MEMORY BRAIN ──────────────────────────────────
         if (handleMemoryCommand(lower, onResponse)) return true
 
@@ -1447,17 +1609,22 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
                         android.util.Log.e("JARVIS_CMD", "Starting multi-source research: '$topic' mode=$outputMode")
-                        val researchText = researchTopic(topic, outputMode)
-                        android.util.Log.e("JARVIS_CMD", "Research complete, length=${researchText.length}")
+                        val researchResult = researchTopic(topic, outputMode)
+                        android.util.Log.e("JARVIS_CMD", "Research finished, success=${researchResult.success}, length=${researchResult.text.length}")
                         withContext(Dispatchers.Main) {
-                            when (outputMode) {
-                                "tell" -> {
-                                    val summary = researchText.take(450).substringBefore(". ", researchText.take(250)) + "."
-                                    speakText("Here is a brief overview, sir. $summary PDF saved to Downloads.")
+                            if (!researchResult.success) {
+                                Log.e("JARVIS_CMD", "RESEARCH failed before completion: ${researchResult.errorMessage}")
+                                speakText("I could not save the research file.")
+                            } else {
+                                when (outputMode) {
+                                    "tell" -> {
+                                        val summary = researchResult.text.take(450).substringBefore(". ", researchResult.text.take(250)) + "."
+                                        speakText("Here is a brief overview, sir. $summary PDF saved to Downloads.")
+                                    }
+                                    "read" -> speakText("Here is the research on $topic, sir. ${researchResult.text.take(500)}")
+                                    "pc" -> speakText("Research complete, sir. PDF saved and synced to your PC.")
+                                    else -> speakText("Research complete, sir. PDF saved to Downloads folder.")
                                 }
-                                "read" -> speakText("Here is the research on $topic, sir. ${researchText.take(500)}")
-                                "pc" -> speakText("Research complete, sir. PDF saved and synced to your PC.")
-                                else -> speakText("Research complete, sir. PDF saved to Downloads folder.")
                             }
                         }
                     } catch (e: Exception) {
@@ -1870,53 +2037,36 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
         if (lower.contains("add event") || lower.contains("create event") ||
             lower.contains("new event") || lower.contains("schedule meeting") ||
             lower.contains("add to calendar") || lower.contains("schedule an event") ||
-            lower.contains("add appointment") || lower.contains("create appointment")) {
-            val title = extractEventTitle(input)
-            val time = extractTime(lower)
-            val dateCal = extractDate(lower)
-            android.util.Log.e("JARVIS_CMD", "Calendar create - title:'$title' time:$time dateCal:$dateCal")
-            if (title.isNotEmpty() && time != null && dateCal != null) {
-                if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_CALENDAR)
-                    != PackageManager.PERMISSION_GRANTED) {
-                    onResponse("I need calendar permission to create events, sir."); return true
-                }
-                dateCal.set(Calendar.HOUR_OF_DAY, time.first)
-                dateCal.set(Calendar.MINUTE, time.second); dateCal.set(Calendar.SECOND, 0)
-                val startMs = dateCal.timeInMillis; val endMs = startMs + 60 * 60 * 1000L
-                val amPm = if (time.first >= 12) "PM" else "AM"
-                val h = if (time.first > 12) time.first - 12 else if (time.first == 0) 12 else time.first
-                onResponse("Creating the event, sir.")
-                CoroutineScope(Dispatchers.IO).launch {
-                    val created = createCalendarEventDirect(title, startMs, endMs)
-                    withContext(Dispatchers.Main) {
-                        if (created) {
-                            speakText("'$title' added to your calendar for $h:${time.second.toString().padStart(2, '0')} $amPm, sir.")
-                        } else {
-                            try {
-                                startActivity(Intent(Intent.ACTION_INSERT).apply {
-                                    data = CalendarContract.Events.CONTENT_URI
-                                    putExtra(CalendarContract.Events.TITLE, title)
-                                    putExtra(CalendarContract.Events.DTSTART, startMs)
-                                    putExtra(CalendarContract.Events.DTEND, endMs)
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                })
-                            } catch (e: Exception) { openApp("com.samsung.android.calendar") }
-                            speakText("Opening calendar to create the event, sir.")
-                        }
+            lower.contains("add appointment") || lower.contains("create appointment") ||
+            ((lower.contains("set") || lower.contains("add") || lower.contains("create") ||
+              lower.contains("schedule") || lower.contains("book")) &&
+             (lower.contains("event") || lower.contains("appointment") || lower.contains("meeting")))) {
+            Log.e("JARVIS_CMD", "Command detected: calendar")
+            Log.e("JARVIS_CMD", "Calendar command detected")
+            val actionHandler = CalendarActionHandler(this)
+            val draft = actionHandler.mergeDraft(pendingCalendarDraft, input)
+            val parsed = actionHandler.toParsedEvent(draft)
+            if (parsed == null) {
+                pendingCalendarDraft = draft
+                onResponse(actionHandler.followUpQuestion(draft))
+                return true
+            }
+            pendingCalendarDraft = null
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_CALENDAR)
+                != PackageManager.PERMISSION_GRANTED) {
+                onResponse("I need calendar permission to create events, sir."); return true
+            }
+            onResponse("Creating the event, sir.")
+            CoroutineScope(Dispatchers.IO).launch {
+                val result = CalendarActionHandler(this@MainActivity)
+                    .addCalendarEvent(parsed.title, parsed.startTime, parsed.endTime, parsed.location)
+                Log.e("JARVIS_CMD", "Calendar event inserted: ${result.eventUri}")
+                withContext(Dispatchers.Main) {
+                    if (result.success) {
+                        speakText("Your event has been added")
+                    } else {
+                        speakText("Couldn't add the event sir. ${result.message}")
                     }
-                }
-            } else {
-                android.util.Log.e("JARVIS_CMD", "Calendar create: insufficient info (need title+time+date), opening app")
-                try {
-                    startActivity(Intent(Intent.ACTION_INSERT).apply {
-                        data = CalendarContract.Events.CONTENT_URI
-                        if (title.isNotEmpty()) putExtra(CalendarContract.Events.TITLE, title)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    })
-                    onResponse("Opening calendar to create event, sir.")
-                } catch (e: Exception) {
-                    openApp("com.samsung.android.calendar")
-                    onResponse("Opening calendar, sir.")
                 }
             }
             return true
@@ -2071,8 +2221,14 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
             lower.contains("what's on my screen") || lower.contains("whats on my screen") ||
             lower.contains("read my screen") || lower.contains("what is on my screen") ||
             lower.contains("analyze screen") || lower.contains("summarize screen")) {
-            onResponse("Let me take a look, sir.")
-            takeScreenshotAndAnalyze()
+            val screenSummary = ScreenContentRepository.currentSummary()
+            if (screenSummary.isBlank()) {
+                onResponse("Let me take a look, sir.")
+                takeScreenshotAndAnalyze()
+            } else {
+                Log.e("JARVIS_CMD", "Raw screen text: ${ScreenContentRepository.currentText().take(1000)}")
+                onResponse(screenSummary)
+            }
             return true
         }
 
@@ -2177,24 +2333,22 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                     val extractPrompt = """Extract personal info from this statement as a JSON object with field=value pairs. Only include explicitly stated facts. Keep field names simple (e.g. favorite_food, hobby, job).
 Statement: "$input"
 Return ONLY the JSON object, nothing else."""
-                    val body = JSONObject().apply {
+                    val anthropicBody = JSONObject().apply {
                         put("model", "claude-sonnet-4-6")
                         put("max_tokens", 200)
                         put("messages", JSONArray().apply {
                             put(JSONObject().apply { put("role", "user"); put("content", extractPrompt) })
                         })
                     }
-                    val response = OkHttpClient().newCall(
-                        Request.Builder()
-                            .url("https://api.anthropic.com/v1/messages")
-                            .addHeader("Content-Type", "application/json")
-                            .addHeader("x-api-key", ANTHROPIC_API_KEY)
-                            .addHeader("anthropic-version", "2023-06-01")
-                            .post(body.toString().toRequestBody("application/json".toMediaType()))
-                            .build()
-                    ).execute()
-                    val respBody = response.body?.string() ?: return@launch
-                    val extractedText = JSONObject(respBody).getJSONArray("content").getJSONObject(0).getString("text").trim()
+                    val openAiBody = JSONObject().apply {
+                        put("model", "gpt-4o-mini")
+                        put("max_tokens", 200)
+                        put("messages", JSONArray().apply {
+                            put(JSONObject().apply { put("role", "user"); put("content", extractPrompt) })
+                        })
+                    }
+                    val extractedText = executeAiTextRequest("Personal info extraction", anthropicBody, openAiBody)
+                        ?: return@launch
                     android.util.Log.e("JARVIS_CMD", "Extracted personal info: $extractedText")
                     val extracted = try {
                         val jsonStr = extractedText.substringAfter("{").substringBeforeLast("}").let { "{$it}" }
@@ -2307,6 +2461,10 @@ Return ONLY the JSON object, nothing else."""
         }
 
         fun handleUserInput(text: String) {
+            if (text.trim().isEmpty()) {
+                Log.e("JARVIS_CMD", "Skipping AI: empty content")
+                return
+            }
             if (isCurrentlySpeaking) {
                 android.util.Log.e("JARVIS_CMD", "Ignoring input while speaking: $text")
                 return
@@ -2388,7 +2546,7 @@ Return ONLY the JSON object, nothing else."""
                             }
                         )
                     }
-                } else {
+                } else if (shouldUseAiFallback(text)) {
                     val response = sendToJarvis(text, messages, memoryData)
                     messages = messages + ChatMessage("JARVIS", response)
                     isThinking = false; isSpeaking = true; sessionCount++
@@ -2400,6 +2558,9 @@ Return ONLY the JSON object, nothing else."""
                     }
                     syncMessageToFirebase(text, response)
                     saveConversationToFirebase(messages)
+                } else {
+                    Log.e("JARVIS_CMD", "Skipping AI for command-like input: $text")
+                    isThinking = false
                 }
             }
         }
@@ -3159,6 +3320,12 @@ Return ONLY the JSON object, nothing else."""
     private suspend fun sendToJarvis(
         userInput: String, messages: List<ChatMessage>, memoryData: Map<String, Any>
     ): String = withContext(Dispatchers.IO) {
+        val safeInput = userInput.trim()
+        if (safeInput.isEmpty()) {
+            Log.e("JARVIS_CMD", "Skipping AI: empty content")
+            return@withContext "I did not catch that, sir."
+        }
+        Log.e("JARVIS_CMD", "AI fallback input: $safeInput")
         try {
             val identity = memoryData["identity"] as? Map<*, *>
             val name = identity?.get("name") as? String ?: "sir"
@@ -3208,7 +3375,7 @@ Return ONLY the JSON object, nothing else."""
 
             // Auto-recall: pull memories from shared Firebase brain whose keywords match
             val relevantMemories: List<MemoryEntry> = try {
-                JarvisMemory.findRelevantForPrompt(userInput, 4)
+                JarvisMemory.findRelevantForPrompt(safeInput, 4)
             } catch (e: Exception) {
                 Log.e("JARVIS_CMD", "findRelevantForPrompt failed: ${e.message}")
                 emptyList()
@@ -3265,38 +3432,36 @@ Use memory naturally in conversation."""
 
             val hist = JSONArray()
             messages.takeLast(15).forEach { msg ->
-                if (msg.role != "SYSTEM") {
+                if (msg.role != "SYSTEM" && msg.content.trim().isNotEmpty()) {
                     hist.put(JSONObject().apply {
                         put("role", if (msg.role == "JARVIS") "assistant" else "user")
-                        put("content", msg.content)
+                        put("content", msg.content.trim())
                     })
                 }
             }
-            hist.put(JSONObject().apply { put("role", "user"); put("content", userInput) })
+            hist.put(JSONObject().apply { put("role", "user"); put("content", safeInput) })
 
-            val body = JSONObject().apply {
+            val anthropicBody = JSONObject().apply {
                 put("model", "claude-sonnet-4-6")
                 put("max_tokens", 1024)
                 put("system", systemPrompt)
                 put("messages", hist)
             }
+            val openAiMessages = JSONArray().apply {
+                put(JSONObject().apply { put("role", "system"); put("content", systemPrompt) })
+                for (i in 0 until hist.length()) put(hist.getJSONObject(i))
+            }
+            val openAiBody = JSONObject().apply {
+                put("model", "gpt-4o-mini")
+                put("max_tokens", 1024)
+                put("messages", openAiMessages)
+            }
 
-            val response = OkHttpClient().newCall(
-                Request.Builder()
-                    .url("https://api.anthropic.com/v1/messages")
-                    .addHeader("Content-Type", "application/json")
-                    .addHeader("x-api-key", ANTHROPIC_API_KEY)
-                    .addHeader("anthropic-version", "2023-06-01")
-                    .post(body.toString().toRequestBody("application/json".toMediaType()))
-                    .build()
-            ).execute()
-
-            val respBody = response.body?.string() ?: return@withContext "Error, sir."
-            JSONObject(respBody).getJSONArray("content")
-                .getJSONObject(0).getString("text")
-                .replace("**", "").replace("*", "").trim()
+            executeAiTextRequest("AI fallback", anthropicBody, openAiBody)
+                ?: "AI request failed. Check Logcat."
         } catch (e: Exception) {
-            "I encountered a technical difficulty, sir. ${e.message?.take(40)}"
+            Log.e("JARVIS_CMD", "AI fallback error: ${e.message}", e)
+            "AI request failed. Check Logcat."
         }
     }
 
@@ -3335,6 +3500,22 @@ Use memory naturally in conversation."""
         if (agentTriggers.any { lower.contains(it) }) return true
         val wordCount = lower.split(Regex("\\s+")).filter { it.isNotBlank() }.size
         return wordCount >= 8
+    }
+
+    private fun shouldUseAiFallback(text: String): Boolean {
+        val lower = text.lowercase().trim()
+        val neverAi = listOf(
+            "calendar", "appointment", "schedule", "add event", "create event", "meeting", "dental",
+            "alarm", "timer", "wake me", "screen", "what do you see", "describe my screen",
+            "read my screen", "on my screen", "open ", "launch ", "play ", "pause", "resume",
+            "weather", "temperature", "forecast", "notification", "message", "call ", "navigate",
+            "directions", "settings", "wifi", "bluetooth", "volume", "brightness", "screenshot"
+        )
+        if (neverAi.any { lower.contains(it) }) return false
+        val generalQuestion = listOf("what ", "why ", "how ", "who ", "when ", "where ", "explain ", "tell me ")
+            .any { lower.startsWith(it) }
+        val wordCount = lower.split(Regex("\\s+")).filter { it.isNotBlank() }.size
+        return generalQuestion || wordCount >= 3
     }
 
     override fun speakInterim(text: String) {
