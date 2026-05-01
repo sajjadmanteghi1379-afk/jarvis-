@@ -176,6 +176,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
     override fun onCreate() {
         super.onCreate()
         isRunning = true
+        JarvisStateManager.setState(JarvisState.BACKGROUND_ACTIVE)
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Listening for 'Hey Jarvis'...", false))
         try {
@@ -334,6 +335,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
         isRunning = false
         isAwake = false
         isServiceRunning = false
+        JarvisStateManager.setState(JarvisState.IDLE)
         try {
             if (wakeLock?.isHeld == true) wakeLock?.release()
         } catch (e: Exception) {
@@ -497,6 +499,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
         try {
             isStartingListening = true
             recognizer.startListening(listenIntent)
+            JarvisStateManager.setState(JarvisState.LISTENING)
             val now = System.currentTimeMillis()
             if (now - lastRecognizerResumeLogMs > 1500L) {
                 Log.e("JARVIS_CMD", "Recognizer resumed")
@@ -504,6 +507,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
             }
         } catch (e: Exception) {
             isStartingListening = false
+            JarvisStateManager.setState(JarvisState.ERROR)
             Log.e("JARVIS_CMD", "startListening error: ${e.message}")
             if (isRunning) scope.launch { delay(1000); startListening() }
         }
@@ -573,6 +577,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
     private fun speakResponse(text: String, onDone: () -> Unit = {}) {
         if (!isTtsReady || tts == null) { onDone(); return }
         isSpeaking = true
+        JarvisStateManager.setState(JarvisState.SPEAKING)
         try { speechRecognizer?.cancel() } catch (_: Exception) {}
         isListening = false
         isStartingListening = false
@@ -589,6 +594,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
                 ttsEndTime = System.currentTimeMillis()
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                     isSpeaking = false
+                    JarvisStateManager.setState(if (isRunning) JarvisState.BACKGROUND_ACTIVE else JarvisState.IDLE)
                     Log.e("JARVIS_CMD", "TTS stopped")
                     onDone()
                     startConversationMode()
@@ -599,6 +605,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
                 ttsEndTime = System.currentTimeMillis()
                 scope.launch {
                     isSpeaking = false
+                    JarvisStateManager.setState(JarvisState.ERROR)
                     Log.e("JARVIS_CMD", "TTS stopped")
                     onDone()
                     delay(1000)

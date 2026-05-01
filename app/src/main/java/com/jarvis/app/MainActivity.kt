@@ -19,15 +19,21 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -37,6 +43,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.*
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -237,6 +244,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
             try { JarvisMemory.init(applicationContext) } catch (e: Exception) {
                 Log.e("JARVIS_CMD", "JarvisMemory init failed: ${e.message}")
             }
+            JarvisSettingsStore.init(applicationContext)
+            JarvisStateManager.setState(JarvisState.IDLE)
             setContent { JarvisTheme { JarvisScreen() } }
             try {
                 proactiveMonitor = JarvisProactive(this) { alert: String -> speakText(alert) }
@@ -327,8 +336,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             tts.language = Locale.US
-            tts.setSpeechRate(0.85f)
-            tts.setPitch(0.75f)
+            tts.setSpeechRate(JarvisSettingsStore.settings.ttsSpeed)
+            tts.setPitch(JarvisSettingsStore.settings.ttsPitch)
             val voices = tts.voices
             val preferredVoice = voices?.find { v ->
                 v.name.contains("en-us", ignoreCase = true) &&
@@ -411,6 +420,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
 
     private fun takeScreenshotAndAnalyze() {
         try {
+            JarvisStateManager.setState(JarvisState.THINKING)
             val rootView = window.decorView.rootView
             val bitmap = android.graphics.Bitmap.createBitmap(rootView.width, rootView.height, android.graphics.Bitmap.Config.ARGB_8888)
             val canvas = android.graphics.Canvas(bitmap)
@@ -432,9 +442,11 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                     }
                     sendBroadcast(resultIntent)
                     Log.e("JARVIS_CMD", "Vision result written to static channel and broadcast")
+                    JarvisStateManager.setState(JarvisState.IDLE)
                 }
             }
         } catch (e: Exception) {
+            JarvisStateManager.setState(JarvisState.ERROR)
             Log.e("JARVIS_CMD", "Screenshot failed: ${e.message}")
             val errMsg = "Screenshot failed sir: ${e.message}"
             JarvisListenerService.pendingVisionResult = errMsg
@@ -534,12 +546,17 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
 
     private fun speakWithTTS(text: String, onDone: () -> Unit = {}) {
         isCurrentlySpeaking = true
+        JarvisStateManager.setState(JarvisState.SPEAKING)
         if (::speechRecognizer.isInitialized) {
             try { speechRecognizer.cancel() } catch (_: Exception) {}
         }
         Log.e("JARVIS_CMD", "Recognizer paused")
         if (!isTtsReady) {
-            CoroutineScope(Dispatchers.Main).launch { isCurrentlySpeaking = false; onDone() }
+            CoroutineScope(Dispatchers.Main).launch {
+                isCurrentlySpeaking = false
+                JarvisStateManager.setState(JarvisState.IDLE)
+                onDone()
+            }
             return
         }
         val uttId = "jarvis_${System.currentTimeMillis()}"
@@ -552,6 +569,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                     delay(1000)
                     isCurrentlySpeaking = false
                     Log.e("JARVIS_CMD", "TTS stopped")
+                    JarvisStateManager.setState(if (JarvisListenerService.isRunning) JarvisState.BACKGROUND_ACTIVE else JarvisState.IDLE)
                     onDone()
                 }
             }
@@ -560,6 +578,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                     delay(1000)
                     isCurrentlySpeaking = false
                     Log.e("JARVIS_CMD", "TTS stopped")
+                    JarvisStateManager.setState(JarvisState.ERROR)
                     onDone()
                 }
             }
@@ -569,6 +588,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
 
     private fun speakWithElevenLabs(text: String, onDone: () -> Unit = {}) {
         isCurrentlySpeaking = true
+        JarvisStateManager.setState(JarvisState.SPEAKING)
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val client = OkHttpClient()
@@ -595,8 +615,17 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                             try { mediaPlayer?.stop(); mediaPlayer?.release(); mediaPlayer = null } catch (_: Exception) {}
                             mediaPlayer = MediaPlayer().apply {
                                 setDataSource(f.absolutePath); prepare(); start()
-                                setOnCompletionListener { isCurrentlySpeaking = false; onDone() }
-                                setOnErrorListener { _, _, _ -> isCurrentlySpeaking = false; speakWithTTS(text, onDone); true }
+                                setOnCompletionListener {
+                                    isCurrentlySpeaking = false
+                                    JarvisStateManager.setState(if (JarvisListenerService.isRunning) JarvisState.BACKGROUND_ACTIVE else JarvisState.IDLE)
+                                    onDone()
+                                }
+                                setOnErrorListener { _, _, _ ->
+                                    isCurrentlySpeaking = false
+                                    JarvisStateManager.setState(JarvisState.ERROR)
+                                    speakWithTTS(text, onDone)
+                                    true
+                                }
                             }
                         }
                     }
@@ -641,6 +670,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                 override fun onResults(results: Bundle?) {
                     activityRecognizerListening = false
                     activityRecognizerStarting = false
+                    JarvisStateManager.setState(JarvisState.THINKING)
                     if (isCurrentlySpeaking) {
                         Log.e("JARVIS_CMD", "Ignoring recognition result while speaking")
                         return
@@ -675,6 +705,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                 override fun onError(error: Int) {
                     activityRecognizerListening = false
                     activityRecognizerStarting = false
+                    JarvisStateManager.setState(if (continuousListening) JarvisState.LISTENING else JarvisState.IDLE)
                     if ((isResearching || JarvisListenerService.isResearching) && error == SpeechRecognizer.ERROR_NO_MATCH) {
                         Log.e("JARVIS_CMD", "Ignoring recognition error 7 while research is running")
                         return
@@ -694,6 +725,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                 override fun onReadyForSpeech(params: Bundle?) {
                     activityRecognizerListening = true
                     activityRecognizerStarting = false
+                    JarvisStateManager.setState(JarvisState.LISTENING)
                 }
                 override fun onBeginningOfSpeech() {}
                 override fun onRmsChanged(rmsdB: Float) {}
@@ -703,6 +735,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                 override fun onEvent(eventType: Int, params: Bundle?) {}
             })
             activityRecognizerStarting = true
+            JarvisStateManager.setState(JarvisState.LISTENING)
             speechRecognizer.startListening(intent)
             val now = System.currentTimeMillis()
             if (now - lastActivityRecognizerResumeLogMs > 1500L) {
@@ -712,6 +745,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
         } catch (e: Exception) {
             activityRecognizerListening = false
             activityRecognizerStarting = false
+            JarvisStateManager.setState(JarvisState.ERROR)
             if (continuousListening) CoroutineScope(Dispatchers.Main).launch {
                 delay(1000); if (continuousListening) startListeningInternal(onResult, onError)
             }
@@ -723,12 +757,14 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
         if (::speechRecognizer.isInitialized) { speechRecognizer.stopListening(); speechRecognizer.destroy() }
         activityRecognizerListening = false
         activityRecognizerStarting = false
+        JarvisStateManager.setState(if (JarvisListenerService.isRunning) JarvisState.BACKGROUND_ACTIVE else JarvisState.IDLE)
         Log.e("JARVIS_CMD", "Recognizer paused")
     }
 
     private fun pauseRecognizerForResearch() {
         isResearching = true
         JarvisListenerService.isResearching = true
+        JarvisStateManager.setState(JarvisState.RESEARCHING)
         try {
             if (::speechRecognizer.isInitialized) speechRecognizer.cancel()
         } catch (_: Exception) {}
@@ -742,6 +778,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
             delay(1000)
             isResearching = false
             JarvisListenerService.isResearching = false
+            JarvisStateManager.setState(if (continuousListening) JarvisState.LISTENING else JarvisState.IDLE)
             if (continuousListening && !isCurrentlySpeaking) {
                 startListeningInternal(onResult = { s -> handleUserInputFromService(s) }, onError = {})
             }
@@ -2649,6 +2686,43 @@ Return ONLY the JSON object, nothing else."""
         return false
     }
 
+    private fun openAccessibilitySettings() {
+        startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    private fun openOverlaySettings() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            startActivity(Intent(
+                android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName")
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+    }
+
+    private fun openBatterySettings() {
+        startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    private fun isAccessibilityEnabled(): Boolean {
+        return try {
+            val enabled = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+            enabled?.contains(packageName, ignoreCase = true) == true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun clearJarvisMemory() {
+        try {
+            database.getReference("$FIREBASE_PATH/memory").removeValue()
+            JarvisMemory.forceSync { }
+            speakText("Memory cleared, sir.")
+        } catch (e: Exception) {
+            Log.e("JARVIS_CMD", "Clear memory failed: ${e.message}")
+            speakText("I could not clear memory, sir.")
+        }
+    }
+
     @Composable
     fun JarvisScreen() {
         var messages by remember { mutableStateOf(listOf<ChatMessage>()) }
@@ -2665,6 +2739,10 @@ Return ONLY the JSON object, nothing else."""
         var userName by remember { mutableStateOf("sir") }
         var isEnrolling by remember { mutableStateOf(false) }
         var enrollmentPhrase by remember { mutableStateOf(0) }
+        var showSettings by remember { mutableStateOf(false) }
+        var lastCommand by remember { mutableStateOf("None") }
+        val jarvisState by JarvisStateManager.state.collectAsState()
+        val settings = JarvisSettingsStore.settings
 
         LaunchedEffect(Unit) {
             while (true) {
@@ -2700,13 +2778,14 @@ Return ONLY the JSON object, nothing else."""
             }
         }
 
-        val phase = when {
-            isListening && wakeWordEnabled -> "WAKE WORD"
-            isListening -> "LISTENING"
-            isThinking -> "PROCESSING"
-            isSpeaking -> "SPEAKING"
-            wakeWordEnabled -> "WAKE WORD"
-            else -> "STANDBY"
+        val phase = when (jarvisState) {
+            JarvisState.LISTENING -> if (wakeWordEnabled) "WAKE WORD" else "LISTENING"
+            JarvisState.THINKING -> "PROCESSING"
+            JarvisState.SPEAKING -> "SPEAKING"
+            JarvisState.RESEARCHING -> "RESEARCHING"
+            JarvisState.ERROR -> "ERROR"
+            JarvisState.BACKGROUND_ACTIVE -> "BACKGROUND"
+            JarvisState.IDLE -> if (wakeWordEnabled) "WAKE WORD" else "STANDBY"
         }
 
         fun handleUserInput(text: String) {
@@ -2727,7 +2806,9 @@ Return ONLY the JSON object, nothing else."""
             }
 
             messages = messages + ChatMessage("YOU", text)
+            lastCommand = text
             isThinking = true; isSpeaking = false
+            JarvisStateManager.setState(JarvisState.THINKING)
             commandCount++
 
             scope.launch {
@@ -2910,7 +2991,39 @@ Return ONLY the JSON object, nothing else."""
             if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
         }
 
-        BoxWithConstraints(modifier = Modifier.fillMaxSize().background(Color(0xFF010810))) {
+        val activeStateText = when (jarvisState) {
+            JarvisState.IDLE -> "Idle"
+            JarvisState.LISTENING -> "Listening"
+            JarvisState.THINKING -> "Thinking"
+            JarvisState.SPEAKING -> "Speaking"
+            JarvisState.RESEARCHING -> "Researching"
+            JarvisState.ERROR -> "Error"
+            JarvisState.BACKGROUND_ACTIVE -> "Background Active"
+        }
+        val quickAction: (String) -> Unit = { label ->
+            when (label) {
+                "Screen" -> handleUserInput("read my screen")
+                "Calendar" -> handleUserInput("what's on my calendar today")
+                "Research" -> { userInput = "research " }
+                "Notifications" -> handleUserInput("read my notifications")
+                "Apps" -> { userInput = "open " }
+            }
+        }
+
+        if (showSettings) {
+            SettingsScreen(
+                settings = settings,
+                onBack = { showSettings = false },
+                onOpenAccessibility = { openAccessibilitySettings() },
+                onOpenNotifications = { openNotificationListenerSettings() },
+                onOpenOverlay = { openOverlaySettings() },
+                onOpenBattery = { openBatterySettings() },
+                onOpenCalendar = { requestMultiplePermissionsLauncher.launch(arrayOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR)) },
+                onOpenMicrophone = { requestMultiplePermissionsLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO)) },
+                onClearCommandHistory = { messages = emptyList(); lastCommand = "None" },
+                onClearMemory = { clearJarvisMemory() }
+            )
+        } else BoxWithConstraints(modifier = Modifier.fillMaxSize().background(Color(0xFF010810))) {
             val isWide = this.maxWidth > 600.dp
 
             if (isWide) {
@@ -2922,15 +3035,18 @@ Return ONLY the JSON object, nothing else."""
                             ))),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        TopBar(currentTime, phase, userName)
+                        TopBar(currentTime, phase, userName, onSettings = { showSettings = true })
                         Spacer(modifier = Modifier.height(12.dp))
                         Box(modifier = Modifier.fillMaxWidth().height(420.dp),
                             contentAlignment = Alignment.Center) {
                             ArcReactorMk6(phase = phase, size = 340.dp)
+                            Text(activeStateText, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                         }
                         WaveformBar(isActive = isListening || isSpeaking,
                             color = phaseColor(phase),
                             modifier = Modifier.fillMaxWidth().height(55.dp).padding(horizontal = 20.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
+                        QuickActionRow(onAction = quickAction)
                         Spacer(modifier = Modifier.height(10.dp))
                         StatusGridWide(phase, sessionCount, commandCount)
                         Spacer(modifier = Modifier.height(8.dp))
@@ -2947,6 +3063,16 @@ Return ONLY the JSON object, nothing else."""
                             phaseColor(phase), phaseColor(phase).copy(alpha = 0.9f), Color.Transparent
                         ))))
                     Column(modifier = Modifier.weight(0.45f).fillMaxHeight().background(Color(0xFF000810))) {
+                        StatusSidePanel(
+                            phase = phase,
+                            aiStatus = if (settings.aiFallback) "Ready" else "Fallback Off",
+                            backgroundActive = JarvisListenerService.isRunning,
+                            accessibilityEnabled = isAccessibilityEnabled(),
+                            notificationAccess = isNotificationAccessEnabled(),
+                            calendarPermission = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED,
+                            lastCommand = lastCommand,
+                            modifier = Modifier.fillMaxWidth().height(178.dp).padding(8.dp)
+                        )
                         ChatHeader(phase)
                         LazyColumn(state = listState,
                             modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 8.dp),
@@ -2965,14 +3091,16 @@ Return ONLY the JSON object, nothing else."""
                 }
             } else {
                 Column(modifier = Modifier.fillMaxSize()) {
-                    TopBar(currentTime, phase, userName)
+                    TopBar(currentTime, phase, userName, onSettings = { showSettings = true })
                     Box(modifier = Modifier.fillMaxWidth().height(260.dp),
                         contentAlignment = Alignment.Center) {
                         ArcReactorMk6(phase = phase, size = 230.dp)
+                        Text(activeStateText, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     }
                     WaveformBar(isActive = isListening || isSpeaking,
                         color = phaseColor(phase),
                         modifier = Modifier.fillMaxWidth().height(36.dp).padding(horizontal = 16.dp))
+                    QuickActionRow(onAction = quickAction)
                     PhaseChip(phase)
                     LazyColumn(state = listState,
                         modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 8.dp),
@@ -3004,6 +3132,9 @@ Return ONLY the JSON object, nothing else."""
         "LISTENING" -> Color(0xFF00FF88)
         "PROCESSING" -> Color(0xFFFF6600)
         "SPEAKING" -> Color(0xFF00CFFF)
+        "RESEARCHING" -> Color(0xFFB45CFF)
+        "ERROR" -> Color(0xFFFF4D6D)
+        "BACKGROUND" -> Color(0xFF5C7CFF)
         "WAKE WORD" -> Color(0xFFAA44FF)
         else -> Color(0xFF0077BB)
     }
@@ -3230,7 +3361,7 @@ Return ONLY the JSON object, nothing else."""
     }
 
     @Composable
-    fun TopBar(currentTime: String, phase: String, userName: String) {
+    fun TopBar(currentTime: String, phase: String, userName: String, onSettings: () -> Unit = {}) {
         val color = phaseColor(phase)
         Surface(color = Color(0xFF000D1A), modifier = Modifier.fillMaxWidth()) {
             Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 7.dp),
@@ -3249,8 +3380,188 @@ Return ONLY the JSON object, nothing else."""
                     Spacer(modifier = Modifier.width(5.dp))
                     Text(phase, color = color, fontSize = 9.sp,
                         fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                    IconButton(onClick = onSettings, modifier = Modifier.size(34.dp)) {
+                        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = color)
+                    }
                 }
             }
+        }
+    }
+
+    @Composable
+    fun QuickActionRow(onAction: (String) -> Unit) {
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            listOf("Screen", "Calendar", "Research", "Notifications", "Apps").forEach { label ->
+                AssistChip(
+                    onClick = { onAction(label) },
+                    label = { Text(label, fontSize = 11.sp, fontFamily = FontFamily.Monospace) },
+                    colors = AssistChipDefaults.assistChipColors(
+                        containerColor = Color(0x3316D9FF),
+                        labelColor = Color(0xFFBFEFFF)
+                    ),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x6641DFFF))
+                )
+            }
+        }
+    }
+
+    @Composable
+    fun StatusSidePanel(
+        phase: String,
+        aiStatus: String,
+        backgroundActive: Boolean,
+        accessibilityEnabled: Boolean,
+        notificationAccess: Boolean,
+        calendarPermission: Boolean,
+        lastCommand: String,
+        modifier: Modifier = Modifier
+    ) {
+        val c = phaseColor(phase)
+        Surface(
+            modifier = modifier,
+            color = Color(0xAA061424),
+            shape = RoundedCornerShape(8.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, c.copy(alpha = 0.35f))
+        ) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                Text("SYSTEM STATUS", color = c, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                StatusLine("AI", aiStatus, c)
+                StatusLine("Background", if (backgroundActive) "Active" else "Idle", c)
+                StatusLine("Accessibility", if (accessibilityEnabled) "Enabled" else "Disabled", c)
+                StatusLine("Notifications", if (notificationAccess) "Enabled" else "Disabled", c)
+                StatusLine("Calendar", if (calendarPermission) "Granted" else "Missing", c)
+                Text("LAST COMMAND", color = c.copy(alpha = 0.55f), fontSize = 8.sp, fontFamily = FontFamily.Monospace)
+                Text(lastCommand.take(70), color = Color.White, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+            }
+        }
+    }
+
+    @Composable
+    fun StatusLine(label: String, value: String, color: Color) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(label, color = Color(0xFF8FAEC8), fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+            Text(value, color = color, fontSize = 9.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+        }
+    }
+
+    @Composable
+    fun SettingsScreen(
+        settings: JarvisSettings,
+        onBack: () -> Unit,
+        onOpenAccessibility: () -> Unit,
+        onOpenNotifications: () -> Unit,
+        onOpenOverlay: () -> Unit,
+        onOpenBattery: () -> Unit,
+        onOpenCalendar: () -> Unit,
+        onOpenMicrophone: () -> Unit,
+        onClearCommandHistory: () -> Unit,
+        onClearMemory: () -> Unit
+    ) {
+        val c = Color(0xFF28D7FF)
+        Column(
+            modifier = Modifier.fillMaxSize()
+                .background(Brush.verticalGradient(listOf(Color(0xFF020711), Color(0xFF071529))))
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("Jarvis Settings", color = c, fontSize = 22.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                TextButton(onClick = onBack) { Text("Done") }
+            }
+            SettingsSection("Core") {
+                ToggleRow("Background active", settings.backgroundActive) { JarvisSettingsStore.update { s -> s.copy(backgroundActive = it) } }
+                ToggleRow("Wake word", settings.wakeWordEnabled) { enabled -> JarvisSettingsStore.update { s -> s.copy(wakeWordEnabled = enabled) }; wakeWordEnabled = enabled }
+                SliderRow("Conversation timeout", settings.conversationTimeoutSeconds, 5f, 120f) { JarvisSettingsStore.update { s -> s.copy(conversationTimeoutSeconds = it) } }
+                ToggleRow("Proactive suggestions", settings.proactiveSuggestions) { JarvisSettingsStore.update { s -> s.copy(proactiveSuggestions = it) } }
+            }
+            SettingsSection("Voice") {
+                SliderRow("TTS speed", settings.ttsSpeed, 0.5f, 1.5f) { value -> JarvisSettingsStore.update { s -> s.copy(ttsSpeed = value) }; if (::tts.isInitialized) tts.setSpeechRate(value) }
+                SliderRow("TTS pitch", settings.ttsPitch, 0.6f, 1.4f) { value -> JarvisSettingsStore.update { s -> s.copy(ttsPitch = value) }; if (::tts.isInitialized) tts.setPitch(value) }
+                ToggleRow("Voice feedback", settings.voiceFeedback) { JarvisSettingsStore.update { s -> s.copy(voiceFeedback = it) } }
+            }
+            SettingsSection("AI") {
+                StatusLine("Provider", if (currentAiProvider() == AiProvider.ANTHROPIC) "Anthropic" else "OpenAI", c)
+                ResearchModeRow(settings.researchMode)
+                ToggleRow("AI fallback", settings.aiFallback) { JarvisSettingsStore.update { s -> s.copy(aiFallback = it) } }
+            }
+            SettingsSection("HUD") {
+                ToggleRow("Floating HUD", settings.hud.floatingHudEnabled) { enabled ->
+                    JarvisSettingsStore.update { s -> s.copy(hud = s.hud.copy(floatingHudEnabled = enabled)) }
+                    FloatingHudController.applySettings(this@MainActivity, JarvisSettingsStore.settings.hud)
+                }
+                SliderRow("HUD opacity", settings.hud.opacity, 0.25f, 1f) { JarvisSettingsStore.update { s -> s.copy(hud = s.hud.copy(opacity = it)) } }
+                SliderRow("HUD size", settings.hud.size, 0.6f, 1.4f) { JarvisSettingsStore.update { s -> s.copy(hud = s.hud.copy(size = it)) } }
+                SliderRow("Animation intensity", settings.hud.animationIntensity, 0f, 1f) { JarvisSettingsStore.update { s -> s.copy(hud = s.hud.copy(animationIntensity = it)) } }
+            }
+            SettingsSection("Privacy") {
+                ToggleRow("Screen vision", settings.screenVision) { JarvisSettingsStore.update { s -> s.copy(screenVision = it) } }
+                ToggleRow("Read notifications", settings.readNotifications) { JarvisSettingsStore.update { s -> s.copy(readNotifications = it) } }
+                ToggleRow("Save memory", settings.saveMemory) { JarvisSettingsStore.update { s -> s.copy(saveMemory = it) } }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onClearCommandHistory) { Text("Clear command history") }
+                    Button(onClick = onClearMemory) { Text("Clear memory") }
+                }
+            }
+            SettingsSection("Permissions") {
+                PermissionButton("Accessibility service", isAccessibilityEnabled(), onOpenAccessibility)
+                PermissionButton("Notification access", isNotificationAccessEnabled(), onOpenNotifications)
+                PermissionButton("Overlay permission", Build.VERSION.SDK_INT < Build.VERSION_CODES.M || android.provider.Settings.canDrawOverlays(this@MainActivity), onOpenOverlay)
+                PermissionButton("Battery optimization", true, onOpenBattery)
+                PermissionButton("Calendar permission", ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED, onOpenCalendar)
+                PermissionButton("Microphone permission", ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED, onOpenMicrophone)
+            }
+        }
+    }
+
+    @Composable
+    fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+        Surface(color = Color(0xAA061424), shape = RoundedCornerShape(8.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x4432DFFF))) {
+            Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(title.uppercase(), color = Color(0xFF28D7FF), fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                content()
+            }
+        }
+    }
+
+    @Composable
+    fun ToggleRow(label: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text(label, color = Color.White, fontSize = 13.sp)
+            Switch(checked = checked, onCheckedChange = onChecked)
+        }
+    }
+
+    @Composable
+    fun SliderRow(label: String, value: Float, min: Float, max: Float, onValue: (Float) -> Unit) {
+        Column {
+            Text("$label: ${String.format(Locale.getDefault(), "%.2f", value)}", color = Color.White, fontSize = 13.sp)
+            Slider(value = value, onValueChange = onValue, valueRange = min..max)
+        }
+    }
+
+    @Composable
+    fun ResearchModeRow(current: String) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("short", "detailed", "PDF").forEach { mode ->
+                FilterChip(
+                    selected = current.equals(mode, ignoreCase = true),
+                    onClick = { JarvisSettingsStore.update { s -> s.copy(researchMode = mode) } },
+                    label = { Text(mode) }
+                )
+            }
+        }
+    }
+
+    @Composable
+    fun PermissionButton(label: String, granted: Boolean, onClick: () -> Unit) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("$label: ${if (granted) "Enabled" else "Missing"}", color = if (granted) Color(0xFF7CFFB2) else Color(0xFFFFB86B), fontSize = 12.sp)
+            OutlinedButton(onClick = onClick) { Text("Open") }
         }
     }
 
@@ -3575,6 +3886,7 @@ Return ONLY the JSON object, nothing else."""
             return@withContext "I did not catch that, sir."
         }
         Log.e("JARVIS_CMD", "AI fallback input: $safeInput")
+        JarvisStateManager.setState(JarvisState.THINKING)
         try {
             val identity = memoryData["identity"] as? Map<*, *>
             val name = identity?.get("name") as? String ?: "sir"
@@ -3706,10 +4018,12 @@ Use memory naturally in conversation."""
                 put("messages", openAiMessages)
             }
 
-            executeAiTextRequest("AI fallback", anthropicBody, openAiBody)
-                ?: "I could not reach the AI service."
+            val result = executeAiTextRequest("AI fallback", anthropicBody, openAiBody)
+            if (result == null) JarvisStateManager.setState(JarvisState.ERROR)
+            result ?: "I could not reach the AI service."
         } catch (e: Exception) {
             Log.e("JARVIS_CMD", "AI fallback error: ${e.message}", e)
+            JarvisStateManager.setState(JarvisState.ERROR)
             "I could not reach the AI service."
         }
     }
@@ -3753,6 +4067,7 @@ Use memory naturally in conversation."""
     }
 
     private fun shouldUseAiFallback(text: String): Boolean {
+        if (!JarvisSettingsStore.settings.aiFallback) return false
         val lower = text.lowercase().trim()
         val neverAi = listOf(
             "calendar", "appointment", "schedule", "add event", "create event", "meeting", "dental",
