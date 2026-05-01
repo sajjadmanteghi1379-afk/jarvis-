@@ -64,6 +64,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
     private var isTtsReady = false
     private var isSpeaking = false
     private var isListening = false
+    private var isStartingListening = false
     private var isMuted = false
     private var earlyExecuted = false
     private val scope = CoroutineScope(Dispatchers.Main)
@@ -89,6 +90,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
     // ─── Consecutive recognition error counter ────────────────────────────────
     private var consecutiveErrors = 0
     private var lastConsecutiveErrorTime = 0L
+    private var lastRecognizerResumeLogMs = 0L
 
     // ─── Notification announcement bookkeeping ─────────────────────────────
     private var lastNotificationAnnounceMs: Long = 0L
@@ -102,6 +104,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
     private var recipeCreationMode: Boolean = false
     private var pendingRecipeName: String = ""
     private val pendingRecipeSteps: MutableList<String> = mutableListOf()
+    private var pendingCalendarDraft: CalendarEventDraft? = null
 
     // ─── App entry table (mirrors MainActivity) ────────────────────────────
     private data class AppEntry(val keywords: List<String>, val packages: List<String>, val name: String)
@@ -360,6 +363,10 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
             Log.e("JARVIS_CMD", "Speech recognition not available")
             return
         }
+        if (speechRecognizer != null) {
+            startListening()
+            return
+        }
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
         Log.e("JARVIS_CMD", "SpeechRecognizer created once — will reuse across cycles")
 
@@ -378,8 +385,12 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
         speechRecognizer?.setRecognitionListener(object : RecognitionListener {
             override fun onResults(results: android.os.Bundle?) {
                 isListening = false
-                if (isSpeaking) { Log.e("JARVIS_CMD", "Got result while speaking, ignoring"); if (isRunning) scope.launch { delay(200); startListening() }; return }
-                if (System.currentTimeMillis() - ttsEndTime < 2000) { Log.e("JARVIS_CMD", "Too soon after TTS, ignoring"); if (isRunning) scope.launch { delay(200); startListening() }; return }
+                isStartingListening = false
+                if (isSpeaking) {
+                    Log.e("JARVIS_CMD", "Ignoring recognition result while speaking")
+                    return
+                }
+                if (System.currentTimeMillis() - ttsEndTime < 2000) { Log.e("JARVIS_CMD", "Too soon after TTS, ignoring"); if (isRunning) scope.launch { delay(1000); startListening() }; return }
                 if (earlyExecuted) { earlyExecuted = false; if (isRunning && !isSpeaking) scope.launch { delay(200); startListening() }; return }
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 val text = matches?.firstOrNull()?.lowercase() ?: ""
@@ -389,6 +400,11 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
             }
             override fun onError(error: Int) {
                 isListening = false
+                isStartingListening = false
+                if (isSpeaking) {
+                    Log.e("JARVIS_CMD", "Ignoring recognition error while speaking: $error")
+                    return
+                }
                 val now = System.currentTimeMillis()
                 if (now - lastConsecutiveErrorTime > 15000) consecutiveErrors = 0
                 consecutiveErrors++
@@ -420,12 +436,19 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
                     else -> scope.launch { delay(800); if (!isSpeaking && !isListening) startListening() }
                 }
             }
-            override fun onEndOfSpeech() { isListening = false }
-            override fun onReadyForSpeech(params: android.os.Bundle?) {}
+            override fun onEndOfSpeech() { isListening = false; isStartingListening = false }
+            override fun onReadyForSpeech(params: android.os.Bundle?) {
+                isListening = true
+                isStartingListening = false
+            }
             override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onPartialResults(partialResults: android.os.Bundle?) {
+                if (isSpeaking) {
+                    Log.e("JARVIS_CMD", "Ignoring partial recognition while speaking")
+                    return
+                }
                 if (earlyExecuted) return
                 val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull()?.lowercase()?.trim() ?: return
@@ -453,11 +476,21 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
 
     private fun startListening() {
         if (!isRunning || isSpeaking) return
-        if (isListening) return
+        if (isListening || isStartingListening) return
+        val recognizer = speechRecognizer ?: run {
+            initAndStartListening()
+            return
+        }
         try {
-            speechRecognizer?.startListening(listenIntent)
-            isListening = true
+            isStartingListening = true
+            recognizer.startListening(listenIntent)
+            val now = System.currentTimeMillis()
+            if (now - lastRecognizerResumeLogMs > 1500L) {
+                Log.e("JARVIS_CMD", "Recognizer resumed")
+                lastRecognizerResumeLogMs = now
+            }
         } catch (e: Exception) {
+            isStartingListening = false
             Log.e("JARVIS_CMD", "startListening error: ${e.message}")
             if (isRunning) scope.launch { delay(1000); startListening() }
         }
@@ -475,6 +508,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
             } catch (_: Exception) {}
             speechRecognizer = null
             isListening = false
+            isStartingListening = false
             delay(500)
             if (!isRunning) return@launch
             initAndStartListening()
@@ -524,26 +558,33 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
         isSpeaking = true
         try { speechRecognizer?.cancel() } catch (_: Exception) {}
         isListening = false
+        isStartingListening = false
+        Log.e("JARVIS_CMD", "Recognizer paused")
         Log.e("JARVIS_CMD", "Service TTS: '$text'")
         trackTts(text)
 
         val uttId = "svc_${System.currentTimeMillis()}"
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(uid: String?) {}
+            override fun onStart(uid: String?) {
+                Log.e("JARVIS_CMD", "TTS started")
+            }
             override fun onDone(uid: String?) {
                 ttsEndTime = System.currentTimeMillis()
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                     isSpeaking = false
+                    Log.e("JARVIS_CMD", "TTS stopped")
                     onDone()
                     startConversationMode()
                     if (!isListening && isRunning) startListening()
-                }, 1500)
+                }, 1000)
             }
             override fun onError(uid: String?) {
                 ttsEndTime = System.currentTimeMillis()
                 scope.launch {
                     isSpeaking = false
+                    Log.e("JARVIS_CMD", "TTS stopped")
                     onDone()
+                    delay(1000)
                     if (isRunning) startListening()
                 }
             }
@@ -1444,7 +1485,8 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
             lower.contains("meeting") || lower.contains("remind me") ||
             (lower.contains("schedule") && !lower.contains("my schedule") &&
              !lower.contains("what's on") && !lower.startsWith("read"))) {
-            Log.e("JARVIS_CMD", "Matched: CALENDAR CREATE (priority handler)")
+            Log.e("JARVIS_CMD", "Command detected: calendar")
+            Log.e("JARVIS_CMD", "Calendar command detected")
             if (checkSelfPermission(android.Manifest.permission.WRITE_CALENDAR) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 speakResponse("I need calendar permission, sir."); return true
             }
@@ -1671,6 +1713,10 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
 
     private fun processResult(text: String) {
         if (text.isBlank()) return
+        if (isSpeaking) {
+            Log.e("JARVIS_CMD", "Ignoring input while speaking: '$text'")
+            return
+        }
         val lower = text.lowercase().trim()
 
         // ── TTS fingerprint echo check (layer 2)
@@ -1700,7 +1746,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
 
         // ── Post-command lockout — block ALL commands for 4s after executing one
         val now = System.currentTimeMillis()
-        if (lastCommandTimestamp > 0 && now - lastCommandTimestamp < 4000L) {
+        if (pendingCalendarDraft == null && lastCommandTimestamp > 0 && now - lastCommandTimestamp < 4000L) {
             Log.e("JARVIS_CMD", "Post-command lockout (${now - lastCommandTimestamp}ms) — ignoring: '$lower'")
             return
         }
@@ -1818,10 +1864,11 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
         val handled = executeCommandInService(command)
         if (!handled) {
             val wordCount = command.split(" ").filter { it.isNotBlank() }.size
-            if (wordCount >= 4) {
+            if ((wordCount >= 4 || lower.contains("research")) && shouldForwardToAi(command)) {
                 Log.e("JARVIS_CMD", "Service forwarding to MainActivity for AI response: '$command'")
                 try { speechRecognizer?.cancel() } catch (_: Exception) {}
                 isListening = false
+                isStartingListening = false
                 sendBroadcast(Intent(ACTION_COMMAND).apply {
                     `package` = packageName
                     putExtra(EXTRA_COMMAND, command)
@@ -1830,6 +1877,22 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
                 Log.e("JARVIS_CMD", "Command not handled and too short for agent ($wordCount words): '$command'")
             }
         }
+    }
+
+    private fun shouldForwardToAi(command: String): Boolean {
+        val lower = command.lowercase(Locale.getDefault())
+        val commandKeywords = listOf(
+            "calendar", "appointment", "schedule", "add event", "meeting", "dental",
+            "alarm", "timer", "wake me", "screen", "what do you see", "read my screen",
+            "open ", "launch ", "play ", "pause", "resume", "weather", "temperature",
+            "forecast", "notification", "message", "call ", "navigate", "directions",
+            "settings", "wifi", "bluetooth", "volume", "brightness", "screenshot"
+        )
+        if (commandKeywords.any { lower.contains(it) }) return false
+        if (lower.contains("research")) return true
+        val questionStarters = listOf("what ", "why ", "how ", "who ", "when ", "where ", "explain ", "tell me ")
+        val wordCount = lower.split(Regex("\\s+")).filter { it.isNotBlank() }.size
+        return questionStarters.any { lower.startsWith(it) } || wordCount >= 3
     }
 
     // ─── Conversation mode helpers ───────────────────────────────────────────
@@ -2022,78 +2085,45 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
     private fun handleCalendarInService(input: String, lower: String) {
         scope.launch(Dispatchers.IO) {
             try {
-                val cal = java.util.Calendar.getInstance()
-                cal.set(java.util.Calendar.SECOND, 0)
-                val now = java.util.Calendar.getInstance()
-
-                when {
-                    lower.contains("tomorrow") -> cal.add(java.util.Calendar.DAY_OF_YEAR, 1)
-                    lower.contains("monday") -> setToNextDay(cal, java.util.Calendar.MONDAY)
-                    lower.contains("tuesday") -> setToNextDay(cal, java.util.Calendar.TUESDAY)
-                    lower.contains("wednesday") -> setToNextDay(cal, java.util.Calendar.WEDNESDAY)
-                    lower.contains("thursday") -> setToNextDay(cal, java.util.Calendar.THURSDAY)
-                    lower.contains("friday") -> setToNextDay(cal, java.util.Calendar.FRIDAY)
-                    lower.contains("saturday") -> setToNextDay(cal, java.util.Calendar.SATURDAY)
-                    lower.contains("sunday") -> setToNextDay(cal, java.util.Calendar.SUNDAY)
+                val actionHandler = CalendarActionHandler(applicationContext)
+                val draft = actionHandler.mergeDraft(pendingCalendarDraft, input)
+                val parsed = actionHandler.toParsedEvent(draft)
+                if (parsed == null) {
+                    pendingCalendarDraft = draft
+                    withContext(Dispatchers.Main) {
+                        speakResponse(actionHandler.followUpQuestion(draft))
+                    }
+                    return@launch
                 }
-
-                var hour = -1; var minute = 0
-                val pmMatch = Regex("(\\d{1,2})(?::(\\d{2}))?\\s*(?:pm|p\\.m)").find(lower)
-                val amMatch = Regex("(\\d{1,2})(?::(\\d{2}))?\\s*(?:am|a\\.m)").find(lower)
-                when {
-                    pmMatch != null -> { hour = pmMatch.groupValues[1].toInt(); minute = pmMatch.groupValues[2].toIntOrNull() ?: 0; if (hour < 12) hour += 12 }
-                    amMatch != null -> { hour = amMatch.groupValues[1].toInt(); minute = amMatch.groupValues[2].toIntOrNull() ?: 0; if (hour == 12) hour = 0 }
-                    lower.contains("noon") -> { hour = 12; minute = 0 }
-                    lower.contains("morning") -> { hour = 9; minute = 0 }
-                    lower.contains("afternoon") -> { hour = 15; minute = 0 }
-                    lower.contains("evening") -> { hour = 19; minute = 0 }
-                    lower.contains("night") -> { hour = 21; minute = 0 }
+                pendingCalendarDraft = null
+                val result = CalendarActionHandler(applicationContext)
+                    .addCalendarEvent(parsed.title, parsed.startTime, parsed.endTime, parsed.location)
+                Log.e("JARVIS_CMD", "Calendar event inserted: ${result.eventUri}")
+                withContext(Dispatchers.Main) {
+                    if (result.success) {
+                        speakResponse("Your event has been added")
+                    } else {
+                        speakResponse("Couldn't add the event sir. ${result.message}")
+                    }
                 }
-                if (hour >= 0) { cal.set(java.util.Calendar.HOUR_OF_DAY, hour); cal.set(java.util.Calendar.MINUTE, minute) }
-                else { cal.set(java.util.Calendar.HOUR_OF_DAY, 12); cal.set(java.util.Calendar.MINUTE, 0) }
-                if (cal.timeInMillis < now.timeInMillis && !lower.contains("tomorrow") && !listOf("monday","tuesday","wednesday","thursday","friday","saturday","sunday").any { lower.contains(it) }) {
-                    cal.add(java.util.Calendar.DAY_OF_YEAR, 1)
-                }
-
-                var title = input
-                    .replace(Regex("(?i)^(hey jarvis,?\\s+)?"), "")
-                    .replace(Regex("(?i)^(set|add|create|schedule|book)\\s+(an?\\s+)?"), "")
-                    .replace(Regex("(?i)\\b(in|to|on|into)\\s+(my\\s+)?calend[ae]r\\b"), "")
-                    .replace(Regex("(?i)\\bcalend[ae]r\\b"), "")
-                    .replace(Regex("(?i)\\b(for\\s+)?(tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next week)\\b"), "")
-                    .replace(Regex("(?i)\\b(at\\s+)?\\d{1,2}(:\\d{2})?\\s*(am|pm|a\\.m\\.?|p\\.m\\.?)\\b"), "")
-                    .replace(Regex("(?i)\\b(morning|afternoon|evening|night|noon)\\b"), "")
-                    .replace(Regex("\\s+"), " ").trim()
-                if (title.length < 3) {
-                    val keywords = listOf("dental","doctor","dentist","surgery","gym","meeting","call","exam","class","haircut","lunch","dinner")
-                    title = keywords.firstOrNull { lower.contains(it) }?.replaceFirstChar { it.uppercase() } ?: "Event"
-                } else title = title.replaceFirstChar { it.uppercase() }
-
-                val calCursor = contentResolver.query(CalendarContract.Calendars.CONTENT_URI, arrayOf(CalendarContract.Calendars._ID), "${CalendarContract.Calendars.VISIBLE} = 1", null, null)
-                val calendarId = if (calCursor?.moveToFirst() == true) calCursor.getLong(0).also { calCursor.close() } else 1L
-
-                val values = android.content.ContentValues().apply {
-                    put(CalendarContract.Events.CALENDAR_ID, calendarId)
-                    put(CalendarContract.Events.TITLE, title)
-                    put(CalendarContract.Events.DTSTART, cal.timeInMillis)
-                    put(CalendarContract.Events.DTEND, cal.timeInMillis + 3600000L)
-                    put(CalendarContract.Events.EVENT_TIMEZONE, "Europe/Budapest")
-                    put(CalendarContract.Events.DESCRIPTION, "Added by Jarvis")
-                }
-                val uri = contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
-                Log.e("JARVIS_CMD", "Calendar event inserted: '$title' at ${cal.time} → $uri")
-                withContext(Dispatchers.Main) { speakResponse("Done sir, $title added to your calendar.") }
             } catch (e: Exception) {
                 Log.e("JARVIS_CMD", "Calendar insert failed: ${e.message}", e)
-                withContext(Dispatchers.Main) { speakResponse("Couldn't add the event sir, check calendar permissions.") }
+                withContext(Dispatchers.Main) { speakResponse("I need the event title, date, and time before I can add it.") }
             }
         }
     }
 
     // ─── Screen vision — tries stored MediaProjection first, falls back to broadcast ──
     private fun handleScreenVision() {
-        speakResponse("Let me take a look, sir.")
         Log.e("JARVIS_CMD", "Screen vision requested")
+        val summary = ScreenContentRepository.currentSummary()
+        if (summary.isNotBlank()) {
+            Log.e("JARVIS_CMD", "Raw screen text: ${ScreenContentRepository.currentText().take(1000)}")
+            speakResponse(summary)
+            return
+        } else {
+            speakResponse("Let me take a look, sir.")
+        }
 
         // Try 1: Use stored MediaProjection instance directly (works from any app)
         val proj = mediaProjectionInstance

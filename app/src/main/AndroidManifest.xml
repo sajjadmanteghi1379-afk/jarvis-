@@ -212,9 +212,9 @@
             </intent-filter>
         </service>
 
-        <!-- Accessibility service for screen reading (Priority 4) -->
+        <!-- Accessibility service for real screen text understanding -->
         <service
-            android:name=".JarvisAccessibilityService"
+            android:name=".MyAccessibilityService"
             android:exported="true"
             android:label="Jarvis Screen Reader"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">

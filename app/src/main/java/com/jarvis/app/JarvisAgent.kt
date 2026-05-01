@@ -486,6 +486,11 @@ DECISION RULES:
     }
 
     private suspend fun captureScreen(): String = withContext(Dispatchers.Main) {
+        val screenSummary = ScreenContentRepository.currentSummary()
+        if (screenSummary.isNotBlank()) {
+            Log.e("JARVIS_CMD", "Raw screen text: ${ScreenContentRepository.currentText().take(1000)}")
+            return@withContext "$screenSummary\nRaw screen text is available in debug logs."
+        }
         val deferred = CompletableDeferred<String>()
         host.launchScreenCapture { result ->
             if (!deferred.isCompleted) deferred.complete(result)
@@ -847,22 +852,9 @@ DECISION RULES:
             }
             val start = cal.timeInMillis
             val end = start + durationMin * 60_000L
-            var calId = 1L
-            context.contentResolver.query(
-                CalendarContract.Calendars.CONTENT_URI,
-                arrayOf(CalendarContract.Calendars._ID), null, null, null
-            )?.use { if (it.moveToFirst()) calId = it.getLong(0) }
-            val v = ContentValues().apply {
-                put(CalendarContract.Events.CALENDAR_ID, calId)
-                put(CalendarContract.Events.TITLE, title)
-                put(CalendarContract.Events.DTSTART, start)
-                put(CalendarContract.Events.DTEND, end)
-                put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
-                if (location.isNotBlank()) put(CalendarContract.Events.EVENT_LOCATION, location)
-            }
-            val uri = context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, v)
-            if (uri != null) "Calendar event '$title' added at ${"%02d:%02d".format(h, m)}."
-            else "Calendar insert returned null."
+            val result = CalendarActionHandler(context).addCalendarEvent(title, start, end, location)
+            if (result.success) "Calendar event '$title' added at ${"%02d:%02d".format(h, m)}."
+            else result.message
         } catch (e: Exception) { "Calendar add failed: ${e.message?.take(60)}" }
     }
 
