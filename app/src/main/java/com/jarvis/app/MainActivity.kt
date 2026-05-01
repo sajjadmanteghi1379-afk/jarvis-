@@ -64,7 +64,7 @@ import kotlin.math.*
 import kotlin.system.exitProcess
 
 
-const val ANTHROPIC_API_KEY = "suck it "
+const val ANTHROPIC_API_KEY = "REMOVED"
 const val ELEVENLABS_API_KEY = "DISABLED"
 const val ELEVENLABS_VOICE_ID = "pNInz6obpgDQGcFmaJgB"
 const val FIREBASE_PATH = "/jarvis"
@@ -87,12 +87,14 @@ private data class ResearchResult(
     val success: Boolean,
     val text: String = "",
     val savedLocation: String = "",
+    val savedFileName: String = "",
     val errorMessage: String = ""
 )
 
 private data class SaveResult(
     val success: Boolean,
     val location: String = "",
+    val fileName: String = "",
     val errorMessage: String = ""
 )
 
@@ -107,6 +109,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
     private var activityRecognizerListening = false
     private var activityRecognizerStarting = false
     private var lastActivityRecognizerResumeLogMs = 0L
+    private var isResearching = false
+    private var pendingResearchOutputMode: String? = null
     private var originalSystemVolume = 0
     private var originalNotificationVolume = 0
     private val database by lazy { FirebaseDatabase.getInstance() }
@@ -284,6 +288,29 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
             }
         } catch (e: Exception) {
             Log.e("JARVIS_CMD", "Notification listener check failed: ${e.message}")
+        }
+    }
+
+    private fun isNotificationAccessEnabled(): Boolean {
+        val enabled = try {
+            androidx.core.app.NotificationManagerCompat
+                .getEnabledListenerPackages(this)
+                .contains(packageName)
+        } catch (e: Exception) {
+            Log.e("JARVIS_CMD", "Notification listener check failed: ${e.message}")
+            false
+        }
+        Log.e("JARVIS_CMD", "Notification access enabled: $enabled")
+        return enabled
+    }
+
+    private fun openNotificationListenerSettings() {
+        try {
+            startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+        } catch (e: Exception) {
+            Log.e("JARVIS_CMD", "Notification settings open failed: ${e.message}")
         }
     }
 
@@ -482,6 +509,29 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
         pendingCommand.value = command
     }
 
+    private fun isResearchCommand(input: String): Boolean {
+        val lower = input.lowercase(Locale.getDefault()).trim()
+        return lower.contains("research") ||
+            lower.contains("make research") ||
+            (lower.contains("report") && (lower.contains("about") || lower.contains("for") || lower.contains("create") || lower.contains("make"))) ||
+            (lower.startsWith("search ") && (lower.contains("pdf") || lower.contains("report") || lower.contains("save")))
+    }
+
+    private fun cleanResearchTopic(input: String): String {
+        val withoutWake = input.replace(Regex("(?i)\\b(hey|ok|okay|hi)?\\s*jarvis\\b"), " ")
+        val commandWords = setOf(
+            "research", "search", "make", "create", "report", "pdf", "about", "for",
+            "do", "a", "an", "the", "and", "save", "saved", "to", "as", "on",
+            "please", "me", "it", "read", "tell"
+        )
+        return withoutWake
+            .replace(Regex("[^\\p{L}\\p{N}\\s/-]"), " ")
+            .split(Regex("\\s+"))
+            .filter { token -> token.isNotBlank() && token.lowercase(Locale.getDefault()) !in commandWords }
+            .joinToString(" ")
+            .trim()
+    }
+
     private fun speakWithTTS(text: String, onDone: () -> Unit = {}) {
         isCurrentlySpeaking = true
         if (::speechRecognizer.isInitialized) {
@@ -562,6 +612,10 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
     }
 
     private fun startListeningInternal(onResult: (String) -> Unit, onError: () -> Unit) {
+        if (isResearching || JarvisListenerService.isResearching) {
+            Log.e("JARVIS_CMD", "Recognizer start skipped while research is running")
+            return
+        }
         if (isCurrentlySpeaking) {
             Log.e("JARVIS_CMD", "Recognizer start skipped while speaking")
             return
@@ -621,6 +675,14 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                 override fun onError(error: Int) {
                     activityRecognizerListening = false
                     activityRecognizerStarting = false
+                    if ((isResearching || JarvisListenerService.isResearching) && error == SpeechRecognizer.ERROR_NO_MATCH) {
+                        Log.e("JARVIS_CMD", "Ignoring recognition error 7 while research is running")
+                        return
+                    }
+                    if (isResearching || JarvisListenerService.isResearching) {
+                        Log.e("JARVIS_CMD", "Recognition error ignored during research: $error")
+                        return
+                    }
                     if (isCurrentlySpeaking) {
                         Log.e("JARVIS_CMD", "Ignoring recognition error while speaking: $error")
                         return
@@ -662,6 +724,28 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
         activityRecognizerListening = false
         activityRecognizerStarting = false
         Log.e("JARVIS_CMD", "Recognizer paused")
+    }
+
+    private fun pauseRecognizerForResearch() {
+        isResearching = true
+        JarvisListenerService.isResearching = true
+        try {
+            if (::speechRecognizer.isInitialized) speechRecognizer.cancel()
+        } catch (_: Exception) {}
+        activityRecognizerListening = false
+        activityRecognizerStarting = false
+        Log.e("JARVIS_CMD", "Recognizer paused for research")
+    }
+
+    private fun finishResearchAfterSpeech() {
+        CoroutineScope(Dispatchers.Main).launch {
+            delay(1000)
+            isResearching = false
+            JarvisListenerService.isResearching = false
+            if (continuousListening && !isCurrentlySpeaking) {
+                startListeningInternal(onResult = { s -> handleUserInputFromService(s) }, onError = {})
+            }
+        }
     }
 
     private fun openApp(packageName: String): Boolean {
@@ -978,6 +1062,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
 
         val response = researchClient.newCall(request).execute()
         val responseBody = response.body?.string().orEmpty()
+        Log.e("JARVIS_CMD", "$operation: provider=$provider HTTP status=${response.code}")
         if (!response.isSuccessful) {
             Log.e("JARVIS_CMD", "$operation failed HTTP ${response.code}: ${responseBody.take(1200)}")
             return null
@@ -1000,77 +1085,140 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
         }
     }
 
+    private fun decodeHtmlText(value: String): String {
+        return android.text.Html.fromHtml(value, android.text.Html.FROM_HTML_MODE_LEGACY)
+            .toString()
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    private fun fetchWikipediaSummary(topic: String): String {
+        return try {
+            val encodedTopic = android.net.Uri.encode(topic)
+            val wikiUrl = "https://en.wikipedia.org/api/rest_v1/page/summary/$encodedTopic"
+            android.util.Log.e("JARVIS_CMD", "RESEARCH: Wikipedia URL=$wikiUrl")
+            val wikiRequest = Request.Builder()
+                .url(wikiUrl)
+                .addHeader("User-Agent", "JarvisAndroidApp/1.0 (sajjad.manteghi@gmail.com)")
+                .addHeader("Accept", "application/json")
+                .build()
+            val wikiResponse = researchClient.newCall(wikiRequest).execute()
+            val code = wikiResponse.code
+            val body = wikiResponse.body?.string() ?: ""
+            if (wikiResponse.isSuccessful) {
+                val wikiText = JSONObject(body).optString("extract", "").trim()
+                if (wikiText.isNotEmpty()) {
+                    android.util.Log.e("JARVIS_CMD", "RESEARCH: source Wikipedia success")
+                    return wikiText.take(1800)
+                }
+            }
+            android.util.Log.e("JARVIS_CMD", "RESEARCH: source Wikipedia fail")
+            android.util.Log.e("JARVIS_CMD", "RESEARCH: Wikipedia HTTP $code: ${body.take(500)}")
+            ""
+        } catch (e: Exception) {
+            android.util.Log.e("JARVIS_CMD", "RESEARCH: source Wikipedia fail")
+            android.util.Log.e("JARVIS_CMD", "Wikipedia fetch failed: ${e.message}")
+            ""
+        }
+    }
+
+    private fun fetchDuckDuckGoText(topic: String): String {
+        val snippets = mutableListOf<String>()
+        try {
+            val encodedTopic = android.net.Uri.encode(topic)
+            val apiUrl = "https://api.duckduckgo.com/?q=$encodedTopic&format=json&no_redirect=1&no_html=1"
+            val resp = researchClient.newCall(
+                Request.Builder().url(apiUrl)
+                    .addHeader("User-Agent", "JarvisAndroidApp/1.0 (sajjad.manteghi@gmail.com)")
+                    .build()
+            ).execute()
+            val body = resp.body?.string() ?: ""
+            if (resp.isSuccessful) {
+                val json = JSONObject(body)
+                listOf(json.optString("Abstract", ""), json.optString("Answer", ""))
+                    .filter { it.isNotBlank() }
+                    .forEach { snippets.add(it) }
+            } else {
+                android.util.Log.e("JARVIS_CMD", "RESEARCH: DDG instant failed HTTP ${resp.code}: ${body.take(500)}")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("JARVIS_CMD", "DuckDuckGo instant fetch failed: ${e.message}")
+        }
+
+        try {
+            val encodedTopic = android.net.Uri.encode(topic)
+            val htmlUrl = "https://html.duckduckgo.com/html/?q=$encodedTopic"
+            val resp = researchClient.newCall(
+                Request.Builder().url(htmlUrl)
+                    .addHeader("User-Agent", "Mozilla/5.0 JarvisAndroidApp/1.0")
+                    .build()
+            ).execute()
+            val html = resp.body?.string() ?: ""
+            if (resp.isSuccessful) {
+                Regex("<a[^>]*class=\"result__snippet\"[^>]*>(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
+                    .findAll(html)
+                    .map { decodeHtmlText(it.groupValues[1]) }
+                    .filter { it.length > 30 }
+                    .take(5)
+                    .forEach { snippets.add(it) }
+            } else {
+                android.util.Log.e("JARVIS_CMD", "RESEARCH: DDG html failed HTTP ${resp.code}: ${html.take(500)}")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("JARVIS_CMD", "DuckDuckGo html fetch failed: ${e.message}")
+        }
+
+        val result = snippets.distinct().joinToString("\n").take(2200)
+        android.util.Log.e("JARVIS_CMD", if (result.isNotBlank()) "RESEARCH: source DDG success" else "RESEARCH: source DDG fail")
+        return result
+    }
+
+    private fun isMedicalOrDentalTopic(topic: String): Boolean {
+        val lower = topic.lowercase(Locale.getDefault())
+        return listOf(
+            "dental", "dentistry", "tooth", "teeth", "gingiva", "gingivitis", "periodontal",
+            "implant", "composite", "resin", "apex", "locator", "endodontic", "root canal",
+            "clinical", "medical", "medicine", "patient", "diagnosis", "treatment"
+        ).any { lower.contains(it) }
+    }
+
     private suspend fun researchTopic(topic: String, outputMode: String): ResearchResult = withContext(Dispatchers.IO) {
         try {
             android.util.Log.e("JARVIS_CMD", "RESEARCH: topic='$topic' mode='$outputMode'")
 
-            val (wikiText, ddgText) = kotlinx.coroutines.coroutineScope {
-                val wikiDeferred = async {
-                    try {
-                        val encodedTopic = android.net.Uri.encode(topic)
-                        val wikiUrl = "https://en.wikipedia.org/api/rest_v1/page/summary/$encodedTopic"
-                        android.util.Log.e("JARVIS_CMD", "RESEARCH: Wikipedia URL=$wikiUrl")
-                        val wikiRequest = Request.Builder()
-                            .url(wikiUrl)
-                            .addHeader("User-Agent", "JarvisAndroidApp/1.0 (sajjad.manteghi@gmail.com)")
-                            .addHeader("Accept", "application/json")
-                            .build()
-                        val wikiResponse = researchClient.newCall(wikiRequest).execute()
-                        val code = wikiResponse.code
-                        android.util.Log.e("JARVIS_CMD", "RESEARCH: Wikipedia code=$code")
-                        val body = wikiResponse.body?.string() ?: ""
-                        if (wikiResponse.isSuccessful) {
-                            val json = JSONObject(body)
-                            val wikiText = json.optString("extract", "")
-                            android.util.Log.e("JARVIS_CMD", "RESEARCH: Wikipedia got ${wikiText.length} chars")
-                            wikiText.take(1500)
-                        } else {
-                            android.util.Log.e("JARVIS_CMD", "RESEARCH: Wikipedia failed HTTP $code: ${body.take(500)}")
-                            ""
-                        }
-                    } catch (e: Exception) {
-                        android.util.Log.e("JARVIS_CMD", "Wikipedia fetch failed: ${e.message}"); ""
-                    }
-                }
-                val ddgDeferred = async {
-                    try {
-                        val encodedTopic = android.net.Uri.encode(topic)
-                        val url = "https://api.duckduckgo.com/?q=$encodedTopic&format=json&no_redirect=1&no_html=1"
-                        val resp = researchClient.newCall(
-                            Request.Builder().url(url)
-                                .addHeader("User-Agent", "JarvisAndroidApp/1.0 (sajjad.manteghi@gmail.com)")
-                                .build()
-                        ).execute()
-                        val body = resp.body?.string() ?: ""
-                        if (!resp.isSuccessful) {
-                            android.util.Log.e("JARVIS_CMD", "RESEARCH: DDG failed HTTP ${resp.code}: ${body.take(500)}")
-                            return@async ""
-                        }
-                        val json = JSONObject(body)
-                        val abstract = json.optString("Abstract", "")
-                        val answer = json.optString("Answer", "")
-                        val result = listOf(abstract, answer).filter { it.isNotEmpty() }.joinToString(". ").take(800)
-                        android.util.Log.e("JARVIS_CMD", "RESEARCH: DDG length=${result.length}")
-                        result
-                    } catch (e: Exception) {
-                        android.util.Log.e("JARVIS_CMD", "DuckDuckGo fetch failed: ${e.message}"); ""
-                    }
-                }
-                Pair(wikiDeferred.await(), ddgDeferred.await())
+            val wikiText = fetchWikipediaSummary(topic)
+            val ddgText = fetchDuckDuckGoText(topic)
+            val webTextLength = wikiText.length + ddgText.length
+            val limitedWebContext = webTextLength < 300
+            if (limitedWebContext) {
+                android.util.Log.e("JARVIS_CMD", "RESEARCH: fallback to AI-only report")
             }
 
-            val sourceMaterial = buildString {
-                if (wikiText.isNotEmpty()) append("WIKIPEDIA:\n$wikiText\n\n")
-                if (ddgText.isNotEmpty()) append("DUCKDUCKGO INSTANT ANSWER:\n$ddgText\n\n")
-            }
-            if (sourceMaterial.isBlank()) {
-                Log.e("JARVIS_CMD", "RESEARCH failed: no web source returned usable text")
-                return@withContext ResearchResult(false, errorMessage = "No web source returned usable text")
-            }
+            val prompt = """
+                Create a polished professional research report about "$topic".
 
-            val prompt = """Here is Wikipedia: ${if (wikiText.isNotEmpty()) wikiText else "(not available)"}. Here is DuckDuckGo: ${if (ddgText.isNotEmpty()) ddgText else "(not available)"}. Synthesize into comprehensive report on "$topic" with sections: Overview, Key Concepts, Recent Developments, Practical Applications, Sources Cited. Minimum 600 words. Be detailed and professional."""
+                Web context status: ${if (limitedWebContext) "Limited web context was available, so use your knowledge carefully and state that limitation in the Sources section." else "Use the web context below as supporting material."}
 
-            android.util.Log.e("JARVIS_CMD", "RESEARCH: sending ${prompt.length} chars to Claude")
+                Wikipedia summary:
+                ${if (wikiText.isNotBlank()) wikiText else "(not available)"}
+
+                DuckDuckGo search snippets:
+                ${if (ddgText.isNotBlank()) ddgText else "(not available)"}
+
+                Required sections, with these exact headings:
+                Executive summary
+                Key concepts
+                Main explanation
+                ${if (isMedicalOrDentalTopic(topic)) "Clinical/dental relevance" else "Real-world relevance"}
+                Advantages and limitations
+                Practical examples
+                Final takeaway
+                Sources
+
+                Use concise paragraphs and useful bullets. Minimum 700 words. Do not use markdown tables.
+            """.trimIndent()
+
+            android.util.Log.e("JARVIS_CMD", "RESEARCH: sending ${prompt.length} chars to AI")
 
             val anthropicBody = JSONObject().apply {
                 put("model", "claude-sonnet-4-6")
@@ -1094,7 +1242,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                 return@withContext ResearchResult(false, errorMessage = "Research output was empty")
             }
 
-            android.util.Log.e("JARVIS_CMD", "RESEARCH: Claude response=${researchText.length} chars")
+            android.util.Log.e("JARVIS_CMD", "RESEARCH: AI response=${researchText.length} chars")
 
             if (outputMode == "pc") {
                 val timestamp = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.getDefault()).format(Date())
@@ -1107,17 +1255,20 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
             }
 
             val sourcesList = listOfNotNull(
-                if (wikiText.isNotEmpty()) "Wikipedia" else null,
-                if (ddgText.isNotEmpty()) "DuckDuckGo Instant Answer" else null,
-                "Claude AI Synthesis"
+                if (wikiText.isNotEmpty()) "Wikipedia summary" else null,
+                if (ddgText.isNotEmpty()) "DuckDuckGo search snippets" else null,
+                if (limitedWebContext) "Limited web context available; AI synthesis based on topic" else "AI synthesis"
             )
-            val pdfContent = researchText + "\n\nSOURCES: ${sourcesList.joinToString(", ")}"
+            val pdfContent = researchText + "\n\nSources\n${sourcesList.joinToString("\n") { "- $it" }}"
             android.util.Log.e("JARVIS_CMD", "RESEARCH: about to save PDF, content length = ${pdfContent.length}")
             val saveResult = savePdf(topic, pdfContent)
             if (!saveResult.success) {
                 return@withContext ResearchResult(false, text = researchText, errorMessage = saveResult.errorMessage)
             }
-            ResearchResult(true, text = researchText, savedLocation = saveResult.location)
+            android.util.Log.e("JARVIS_CMD", "Research saved to filename: ${saveResult.fileName}")
+            android.util.Log.e("JARVIS_CMD", "Research saved to URI/path: ${saveResult.location}")
+            android.util.Log.e("JARVIS_CMD", "RESEARCH: PDF verified saved")
+            ResearchResult(true, text = researchText, savedLocation = saveResult.location, savedFileName = saveResult.fileName)
         } catch (e: Exception) {
             android.util.Log.e("JARVIS_CMD", "Research coroutine error: ${e.message}")
             ResearchResult(false, errorMessage = e.message ?: "Research failed")
@@ -1129,55 +1280,140 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
         try {
             android.util.Log.e("JARVIS_CMD", "PDF: savePdf() called")
             pdfDoc = android.graphics.pdf.PdfDocument()
-            val paint = android.graphics.Paint().apply {
-                textSize = 11f; color = android.graphics.Color.BLACK
-            }
-            val titlePaint = android.graphics.Paint().apply {
-                textSize = 18f; color = android.graphics.Color.BLACK
+            val pageWidth = 595
+            val pageHeight = 842
+            val margin = 48f
+            val contentWidth = pageWidth - margin * 2
+            val titlePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                textSize = 28f
+                color = android.graphics.Color.rgb(24, 38, 55)
                 isFakeBoldText = true
             }
-            val pageWidth = 595; val pageHeight = 842
-            val margin = 40f; val lineHeight = 16f
+            val subtitlePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                textSize = 14f
+                color = android.graphics.Color.rgb(75, 85, 99)
+            }
+            val headingPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                textSize = 16f
+                color = android.graphics.Color.rgb(16, 89, 120)
+                isFakeBoldText = true
+            }
+            val bodyPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                textSize = 11.5f
+                color = android.graphics.Color.rgb(31, 41, 55)
+            }
+            val footerPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                textSize = 9f
+                color = android.graphics.Color.rgb(107, 114, 128)
+                textAlign = android.graphics.Paint.Align.CENTER
+            }
+            val rulePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                color = android.graphics.Color.rgb(16, 89, 120)
+                strokeWidth = 2f
+            }
+
             var pageNum = 1
             var pageInfo = android.graphics.pdf.PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNum).create()
             var page = pdfDoc.startPage(pageInfo)
             var canvas = page.canvas
-            var y = margin + 30f
+            var y = margin
 
-            canvas.drawText("Jarvis Research Report", margin, y, titlePaint)
-            y += 25f
-            canvas.drawText("Topic: ${topic.take(60)}", margin, y, paint)
-            y += 20f
-            canvas.drawText("Date: ${SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())}", margin, y, paint)
-            y += 25f
+            fun drawFooter() {
+                canvas.drawText("Jarvis Research Report  |  Page $pageNum", pageWidth / 2f, pageHeight - 24f, footerPaint)
+            }
 
-            val maxLineWidth = pageWidth - 2 * margin
-            val words = content.split(" ")
-            var currentLine = ""
-            for (word in words) {
-                val test = if (currentLine.isEmpty()) word else "$currentLine $word"
-                if (paint.measureText(test) <= maxLineWidth) {
-                    currentLine = test
-                } else {
-                    canvas.drawText(currentLine, margin, y, paint)
-                    y += lineHeight
-                    currentLine = word
-                    if (y > pageHeight - margin) {
-                        pdfDoc.finishPage(page)
-                        pageNum++
-                        pageInfo = android.graphics.pdf.PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNum).create()
-                        page = pdfDoc.startPage(pageInfo)
-                        canvas = page.canvas
-                        y = margin + 20f
+            fun newPage() {
+                drawFooter()
+                pdfDoc.finishPage(page)
+                pageNum++
+                pageInfo = android.graphics.pdf.PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNum).create()
+                page = pdfDoc.startPage(pageInfo)
+                canvas = page.canvas
+                y = margin
+            }
+
+            fun ensureSpace(height: Float) {
+                if (y + height > pageHeight - margin - 28f) newPage()
+            }
+
+            fun wrapText(text: String, paint: android.graphics.Paint, width: Float): List<String> {
+                val lines = mutableListOf<String>()
+                text.split("\n").forEach { raw ->
+                    val words = raw.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+                    if (words.isEmpty()) {
+                        lines.add("")
+                    } else {
+                        var line = ""
+                        words.forEach { word ->
+                            val candidate = if (line.isEmpty()) word else "$line $word"
+                            if (paint.measureText(candidate) <= width) {
+                                line = candidate
+                            } else {
+                                if (line.isNotEmpty()) lines.add(line)
+                                line = word
+                            }
+                        }
+                        if (line.isNotEmpty()) lines.add(line)
                     }
                 }
+                return lines
             }
-            if (currentLine.isNotEmpty()) canvas.drawText(currentLine, margin, y, paint)
+
+            fun drawParagraph(text: String, indent: Float = 0f) {
+                wrapText(text, bodyPaint, contentWidth - indent).forEach { line ->
+                    ensureSpace(16f)
+                    if (line.isBlank()) {
+                        y += 7f
+                    } else {
+                        canvas.drawText(line, margin + indent, y, bodyPaint)
+                        y += 15.5f
+                    }
+                }
+                y += 4f
+            }
+
+            fun drawHeading(text: String) {
+                ensureSpace(34f)
+                y += 8f
+                canvas.drawLine(margin, y - 14f, margin + 34f, y - 14f, rulePaint)
+                canvas.drawText(text, margin, y, headingPaint)
+                y += 12f
+            }
+
+            val reportDate = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())
+            y = 155f
+            canvas.drawLine(margin, y - 42f, margin + 86f, y - 42f, rulePaint)
+            canvas.drawText("Jarvis Research Report", margin, y, titlePaint)
+            y += 34f
+            canvas.drawText("Topic: ${topic.take(90)}", margin, y, subtitlePaint)
+            y += 22f
+            canvas.drawText("Date/time: $reportDate", margin, y, subtitlePaint)
+            y += 78f
+            drawParagraph("Prepared as a clean, structured PDF report with concise sections, practical context, and sources.")
+            newPage()
+
+            val headingNames = setOf(
+                "Executive summary", "Key concepts", "Main explanation", "Clinical/dental relevance",
+                "Real-world relevance", "Advantages and limitations", "Practical examples",
+                "Final takeaway", "Sources"
+            )
+            content.lines().map { it.trim() }.filter { it.isNotBlank() }.forEach { line ->
+                val normalized = line.trim().removeSuffix(":")
+                if (headingNames.any { it.equals(normalized, ignoreCase = true) }) {
+                    drawHeading(normalized.replaceFirstChar { ch -> ch.uppercase(Locale.getDefault()) })
+                } else if (line.startsWith("- ") || line.startsWith("• ")) {
+                    drawParagraph("• ${line.drop(2).trim()}", 12f)
+                } else {
+                    drawParagraph(line)
+                }
+            }
+            drawFooter()
             pdfDoc.finishPage(page)
 
-            val safeName = topic.replace(" ", "_").replace(Regex("[^A-Za-z0-9_]"), "").take(40)
-            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-            val fileName = "Jarvis_${safeName}_$timestamp.pdf"
+            val safeName = topic.replace(Regex("\\s+"), "_").replace(Regex("[^A-Za-z0-9_]"), "").trim('_').take(48)
+                .ifBlank { "Topic" }
+            val timestamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
+            val fileName = "Jarvis_Research_${safeName}_$timestamp.pdf"
 
             val resolver = contentResolver
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
@@ -1204,8 +1440,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                         false
                     }
                     if (exists) {
-                        android.util.Log.e("JARVIS_CMD", "Research saved to: $uri")
-                        return SaveResult(true, location = uri.toString())
+                        return SaveResult(true, location = uri.toString(), fileName = fileName)
                     }
                     Log.e("JARVIS_CMD", "PDF: MediaStore saved URI did not pass exists check")
                     return SaveResult(false, errorMessage = "Saved URI did not pass exists check")
@@ -1221,8 +1456,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
             pdfDoc.writeTo(FileOutputStream(file))
             android.util.Log.e("JARVIS_CMD", "PDF: write complete")
             if (file.exists()) {
-                android.util.Log.e("JARVIS_CMD", "Research saved to: ${file.absolutePath}")
-                return SaveResult(true, location = file.absolutePath)
+                return SaveResult(true, location = file.absolutePath, fileName = fileName)
             }
             Log.e("JARVIS_CMD", "PDF: file.exists() returned false for ${file.absolutePath}")
             return SaveResult(false, errorMessage = "File was not found after writing")
@@ -1457,10 +1691,67 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
         return false
     }
 
+    private fun startResearchTask(topic: String, outputMode: String) {
+        pauseRecognizerForResearch()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                android.util.Log.e("JARVIS_CMD", "Starting multi-source research: '$topic' mode=$outputMode")
+                val researchResult = researchTopic(topic, outputMode)
+                android.util.Log.e("JARVIS_CMD", "Research finished, success=${researchResult.success}, length=${researchResult.text.length}")
+                withContext(Dispatchers.Main) {
+                    if (!researchResult.success) {
+                        Log.e("JARVIS_CMD", "RESEARCH failed before completion: ${researchResult.errorMessage}")
+                        speakText("I could not save the research file.") { finishResearchAfterSpeech() }
+                    } else {
+                        val finalMessage = when (outputMode) {
+                            "tell" -> {
+                                val summary = researchResult.text.take(450).substringBefore(". ", researchResult.text.take(250)) + "."
+                                "Research complete. I saved a PDF report to Downloads. $summary"
+                            }
+                            "read" -> "Research complete. I saved a PDF report to Downloads. ${researchResult.text.take(500)}"
+                            "pc" -> "Research complete. I saved a PDF report to Downloads and synced it to your PC."
+                            else -> "Research complete. I saved a PDF report to Downloads."
+                        }
+                        speakText(finalMessage) { finishResearchAfterSpeech() }
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("JARVIS_CMD", "Research error: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    speakText("Research failed, sir.") { finishResearchAfterSpeech() }
+                }
+            }
+        }
+    }
+
     private fun handleVoiceCommand(input: String, onResponse: (String) -> Unit): Boolean {
         android.util.Log.e("JARVIS_CMD", "Received input: '$input'")
         val lower = input.lowercase().trim()
         android.util.Log.e("JARVIS_CMD", "Lowered: '$lower'")
+
+        if (NotificationRepository.isNotificationReadCommand(lower)) {
+            Log.e("JARVIS_CMD", "Command detected: notifications")
+            if (!isNotificationAccessEnabled()) {
+                onResponse("Notification access is not enabled. Please enable it in settings.")
+                openNotificationListenerSettings()
+                return true
+            }
+            Log.e("JARVIS_CMD", "Reading latest notifications")
+            onResponse(NotificationRepository.summarizeLatest(5))
+            return true
+        }
+
+        pendingResearchOutputMode?.let { mode ->
+            val pendingTopic = cleanResearchTopic(input)
+            if (pendingTopic.length > 2) {
+                pendingResearchOutputMode = null
+                startResearchTask(pendingTopic, mode)
+                onResponse("Researching $pendingTopic across multiple sources. One moment.")
+                return true
+            }
+            onResponse("What topic should I research?")
+            return true
+        }
 
         if (pendingCalendarDraft != null) {
             val actionHandler = CalendarActionHandler(this)
@@ -1575,65 +1866,23 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
         }
 
         // ── RESEARCH (multi-source + PDF) ─────────────────────────
-        if (lower.contains("research") || lower.contains("do a research")) {
+        if (isResearchCommand(input)) {
             val saveToPc = lower.contains("save on pc") || lower.contains("save to pc") || lower.contains("send to pc")
             val readAloud = lower.contains("read it to me") || lower.contains("read to me")
             val tellMe = lower.contains("and tell me") || lower.contains("tell me about") || (lower.contains("tell me") && !readAloud)
             val outputMode = when { saveToPc -> "pc"; readAloud -> "read"; tellMe -> "tell"; else -> "pdf" }
 
-            val triggers = listOf("do a research on", "do a research for", "do a research about",
-                "do research on", "do research for", "do research about", "do a research and",
-                "research on", "research for", "research about", "research and", "research")
-            var topic = lower
-            for (t in triggers) {
-                topic = topic.replace(t, " ")
-            }
-            val suffixes = listOf("and tell me", "and save as pdf", "and save on pc",
-                "and read it to me", "and save to pc")
-            for (s in suffixes) {
-                topic = topic.replace(s, " ")
-            }
-            topic = topic.replace("save on pc", " ").replace("save to pc", " ")
-                .replace("send to pc", " ").replace("save as pdf", " ")
-                .replace("read it to me", " ").replace("read to me", " ")
-                .replace("tell me about", " ").replace("and save", " ")
-            topic = topic.replace(Regex("\\s+"), " ").trim()
-            while (topic.startsWith("a ") || topic.startsWith("the ") ||
-                   topic.startsWith("and ") || topic.startsWith("please ")) {
-                topic = topic.substring(topic.indexOf(" ") + 1).trim()
-            }
+            val topic = cleanResearchTopic(input)
             Log.e("JARVIS_CMD", "RESEARCH: final clean topic = '$topic'")
 
             if (topic.length > 2) {
-                onResponse("Researching $topic across multiple sources, sir. One moment.")
-                CoroutineScope(Dispatchers.IO).launch {
-                    try {
-                        android.util.Log.e("JARVIS_CMD", "Starting multi-source research: '$topic' mode=$outputMode")
-                        val researchResult = researchTopic(topic, outputMode)
-                        android.util.Log.e("JARVIS_CMD", "Research finished, success=${researchResult.success}, length=${researchResult.text.length}")
-                        withContext(Dispatchers.Main) {
-                            if (!researchResult.success) {
-                                Log.e("JARVIS_CMD", "RESEARCH failed before completion: ${researchResult.errorMessage}")
-                                speakText("I could not save the research file.")
-                            } else {
-                                when (outputMode) {
-                                    "tell" -> {
-                                        val summary = researchResult.text.take(450).substringBefore(". ", researchResult.text.take(250)) + "."
-                                        speakText("Here is a brief overview, sir. $summary PDF saved to Downloads.")
-                                    }
-                                    "read" -> speakText("Here is the research on $topic, sir. ${researchResult.text.take(500)}")
-                                    "pc" -> speakText("Research complete, sir. PDF saved and synced to your PC.")
-                                    else -> speakText("Research complete, sir. PDF saved to Downloads folder.")
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        android.util.Log.e("JARVIS_CMD", "Research error: ${e.message}")
-                        withContext(Dispatchers.Main) { speakText("Research failed, sir.") }
-                    }
-                }
+                startResearchTask(topic, outputMode)
+                onResponse("Researching $topic across multiple sources. One moment.")
                 return true
             }
+            pendingResearchOutputMode = outputMode
+            onResponse("What topic should I research?")
+            return true
         }
 
         // ── CAMERA COMMANDS ───────────────────────────────────────
@@ -3458,10 +3707,10 @@ Use memory naturally in conversation."""
             }
 
             executeAiTextRequest("AI fallback", anthropicBody, openAiBody)
-                ?: "AI request failed. Check Logcat."
+                ?: "I could not reach the AI service."
         } catch (e: Exception) {
             Log.e("JARVIS_CMD", "AI fallback error: ${e.message}", e)
-            "AI request failed. Check Logcat."
+            "I could not reach the AI service."
         }
     }
 
@@ -3494,7 +3743,8 @@ Use memory naturally in conversation."""
             "what do you see", "on my screen", "describe my screen", "read my screen",
             "alarm", "weather", "temperature", "forecast",
             "notification", "my messages", "read my",
-            "what's on my", "what do i have", "open ", "play ", "launch "
+            "what's on my", "what do i have", "open ", "play ", "launch ",
+            "research", "report", "pdf"
         )
         if (neverAgent.any { lower.contains(it) }) return false
         if (agentTriggers.any { lower.contains(it) }) return true
@@ -3509,7 +3759,8 @@ Use memory naturally in conversation."""
             "alarm", "timer", "wake me", "screen", "what do you see", "describe my screen",
             "read my screen", "on my screen", "open ", "launch ", "play ", "pause", "resume",
             "weather", "temperature", "forecast", "notification", "message", "call ", "navigate",
-            "directions", "settings", "wifi", "bluetooth", "volume", "brightness", "screenshot"
+            "directions", "settings", "wifi", "bluetooth", "volume", "brightness", "screenshot",
+            "research", "report", "pdf"
         )
         if (neverAi.any { lower.contains(it) }) return false
         val generalQuestion = listOf("what ", "why ", "how ", "who ", "when ", "where ", "explain ", "tell me ")

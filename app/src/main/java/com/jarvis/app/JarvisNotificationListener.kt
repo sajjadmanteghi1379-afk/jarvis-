@@ -3,10 +3,10 @@ package com.jarvis.app
 import android.app.Notification
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
-import java.util.ArrayDeque
 
 class JarvisNotificationListener : NotificationListenerService() {
 
@@ -16,11 +16,11 @@ class JarvisNotificationListener : NotificationListenerService() {
         const val EXTRA_MESSAGE = "message"
         const val EXTRA_APP = "app"
 
-        // App package -> friendly name
         val WATCHED_PACKAGES = mapOf(
             "com.whatsapp" to "WhatsApp",
             "org.telegram.messenger" to "Telegram",
             "com.google.android.apps.messaging" to "Messages",
+            "com.samsung.android.messaging" to "Messages",
             "com.instagram.android" to "Instagram",
             "com.google.android.gm" to "Gmail"
         )
@@ -34,75 +34,79 @@ class JarvisNotificationListener : NotificationListenerService() {
             val contentIntent: PendingIntent?
         )
 
-        private val recent = ArrayDeque<NotificationItem>()
-        private val lock = Any()
+        fun snapshot(): List<NotificationItem> = NotificationRepository.latest(50)
+            .asReversed()
+            .map { it.toNotificationItem() }
 
-        fun snapshot(): List<NotificationItem> = synchronized(lock) { recent.toList() }
+        fun lastMessage(): NotificationItem? = NotificationRepository.last()?.toNotificationItem()
 
-        fun lastMessage(): NotificationItem? = synchronized(lock) { recent.lastOrNull() }
+        fun lastN(n: Int): List<NotificationItem> = NotificationRepository.latest(n)
+            .asReversed()
+            .map { it.toNotificationItem() }
 
-        fun lastN(n: Int): List<NotificationItem> = synchronized(lock) {
-            recent.toList().takeLast(n)
-        }
+        fun findBySender(name: String): NotificationItem? = NotificationRepository.findByTitle(name)?.toNotificationItem()
 
-        fun findBySender(name: String): NotificationItem? = synchronized(lock) {
-            val q = name.lowercase().trim()
-            if (q.isEmpty()) return null
-            recent.toList().reversed().firstOrNull { it.sender.lowercase().contains(q) }
-        }
+        fun clear() = NotificationRepository.clear()
 
-        fun clear() = synchronized(lock) { recent.clear() }
-
-        private fun add(item: NotificationItem) = synchronized(lock) {
-            recent.addLast(item)
-            while (recent.size > 20) recent.removeFirst()
+        private fun JarvisNotification.toNotificationItem(): NotificationItem {
+            return NotificationItem(
+                timestamp = timestamp,
+                sender = title,
+                message = text,
+                app = appName,
+                packageName = packageName,
+                contentIntent = null
+            )
         }
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         if (sbn == null) return
         val pkg = sbn.packageName ?: return
-        val appName = WATCHED_PACKAGES[pkg] ?: return
+        if (pkg == packageName) return
 
+        val appName = WATCHED_PACKAGES[pkg] ?: resolveAppName(pkg)
         val extras = sbn.notification?.extras ?: return
-        val sender = extras.getString(Notification.EXTRA_TITLE)
+        val title = extras.getString(Notification.EXTRA_TITLE)
             ?: extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
-            ?: "Unknown"
-        val message = extras.getString(Notification.EXTRA_TEXT)
+            ?: ""
+        val text = extras.getString(Notification.EXTRA_TEXT)
             ?: extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
             ?: ""
 
-        if (message.isBlank()) {
-            Log.e("JARVIS_CMD", "Notification skipped (empty body) from $appName / $sender")
+        if (title.isBlank() && text.isBlank()) {
+            Log.e("JARVIS_CMD", "Notification skipped (empty content) from $appName")
             return
         }
 
-        // Filter out non-message system notifications (e.g. WhatsApp "Checking for new messages")
-        val lowerMsg = message.lowercase()
-        if (lowerMsg.contains("checking for new messages") ||
-            lowerMsg.contains("backup in progress") ||
-            sender.equals("WhatsApp", ignoreCase = true) ||
-            sender.contains("new messages", ignoreCase = true)) {
-            Log.e("JARVIS_CMD", "Notification skipped (system) from $appName: $sender — $message")
+        val lowerText = text.lowercase()
+        if (lowerText.contains("checking for new messages") ||
+            lowerText.contains("backup in progress") ||
+            title.equals("WhatsApp", ignoreCase = true) ||
+            title.contains("new messages", ignoreCase = true)
+        ) {
+            Log.e("JARVIS_CMD", "Notification skipped (system) from $appName: $title - $text")
             return
         }
 
-        val item = NotificationItem(
-            timestamp = System.currentTimeMillis(),
-            sender = sender,
-            message = message,
-            app = appName,
-            packageName = pkg,
-            contentIntent = sbn.notification?.contentIntent
+        NotificationRepository.add(
+            JarvisNotification(
+                appName = appName,
+                packageName = pkg,
+                title = title.ifBlank { appName },
+                text = text,
+                timestamp = sbn.postTime.takeIf { it > 0L } ?: System.currentTimeMillis()
+            )
         )
-        add(item)
-        Log.e("JARVIS_CMD", "Notification captured: [$appName] $sender: $message")
+        Log.e("JARVIS_CMD", "Notification captured: [$appName] $title: $text")
+
+        if (!WATCHED_PACKAGES.containsKey(pkg) || text.isBlank()) return
 
         try {
             sendBroadcast(Intent(ACTION_NEW_NOTIFICATION).apply {
                 `package` = packageName
-                putExtra(EXTRA_SENDER, sender)
-                putExtra(EXTRA_MESSAGE, message)
+                putExtra(EXTRA_SENDER, title.ifBlank { appName })
+                putExtra(EXTRA_MESSAGE, text)
                 putExtra(EXTRA_APP, appName)
             })
         } catch (e: Exception) {
@@ -113,5 +117,16 @@ class JarvisNotificationListener : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         Log.e("JARVIS_CMD", "JarvisNotificationListener connected")
+    }
+
+    private fun resolveAppName(packageName: String): String {
+        return try {
+            val info = packageManager.getApplicationInfo(packageName, 0)
+            packageManager.getApplicationLabel(info).toString()
+        } catch (_: PackageManager.NameNotFoundException) {
+            packageName
+        } catch (_: Exception) {
+            packageName
+        }
     }
 }

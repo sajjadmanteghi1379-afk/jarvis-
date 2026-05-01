@@ -52,6 +52,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
         var isAwake = false
         @Volatile var pendingVisionResult: String? = null
         @Volatile var visionResultReady: Boolean = false
+        @Volatile var isResearching: Boolean = false
         // MediaProjection storage — shared across service instances
         var storedResultCode: Int = 0
         var storedProjectionData: android.content.Intent? = null
@@ -386,6 +387,10 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
             override fun onResults(results: android.os.Bundle?) {
                 isListening = false
                 isStartingListening = false
+                if (isResearching) {
+                    Log.e("JARVIS_CMD", "Ignoring recognition result while research is running")
+                    return
+                }
                 if (isSpeaking) {
                     Log.e("JARVIS_CMD", "Ignoring recognition result while speaking")
                     return
@@ -401,6 +406,14 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
             override fun onError(error: Int) {
                 isListening = false
                 isStartingListening = false
+                if (isResearching && error == SpeechRecognizer.ERROR_NO_MATCH) {
+                    Log.e("JARVIS_CMD", "Ignoring recognition error 7 while research is running")
+                    return
+                }
+                if (isResearching) {
+                    Log.e("JARVIS_CMD", "Recognition error ignored during research: $error")
+                    return
+                }
                 if (isSpeaking) {
                     Log.e("JARVIS_CMD", "Ignoring recognition error while speaking: $error")
                     return
@@ -475,7 +488,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun startListening() {
-        if (!isRunning || isSpeaking) return
+        if (!isRunning || isSpeaking || isResearching) return
         if (isListening || isStartingListening) return
         val recognizer = speechRecognizer ?: run {
             initAndStartListening()
@@ -502,6 +515,10 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
     // Claude/research request). This is the ONLY place we recreate it
     // outside of onCreate.
     private fun rebuildRecognizer() {
+        if (isSpeaking || isResearching) {
+            Log.e("JARVIS_CMD", "Recognizer rebuild skipped during TTS/research")
+            return
+        }
         scope.launch {
             try {
                 speechRecognizer?.destroy()
@@ -575,7 +592,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
                     Log.e("JARVIS_CMD", "TTS stopped")
                     onDone()
                     startConversationMode()
-                    if (!isListening && isRunning) startListening()
+                    if (!isListening && isRunning && !isResearching) startListening()
                 }, 1000)
             }
             override fun onError(uid: String?) {
@@ -585,7 +602,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
                     Log.e("JARVIS_CMD", "TTS stopped")
                     onDone()
                     delay(1000)
-                    if (isRunning) startListening()
+                    if (isRunning && !isResearching) startListening()
                 }
             }
         })
@@ -691,6 +708,29 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────
+
+    private fun isNotificationAccessEnabled(): Boolean {
+        val enabled = try {
+            androidx.core.app.NotificationManagerCompat
+                .getEnabledListenerPackages(this)
+                .contains(packageName)
+        } catch (e: Exception) {
+            Log.e("JARVIS_CMD", "Notification listener check failed: ${e.message}")
+            false
+        }
+        Log.e("JARVIS_CMD", "Notification access enabled: $enabled")
+        return enabled
+    }
+
+    private fun openNotificationListenerSettings() {
+        try {
+            startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+        } catch (e: Exception) {
+            Log.e("JARVIS_CMD", "Notification settings open failed: ${e.message}")
+        }
+    }
 
     private fun extractNumber(text: String): Int {
         val words = mapOf("one" to 1, "two" to 2, "three" to 3, "four" to 4, "five" to 5,
@@ -859,6 +899,18 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
         }
 
         // ── SHARED MEMORY BRAIN ──────────────────────────────────────────────
+        if (NotificationRepository.isNotificationReadCommand(lower)) {
+            Log.e("JARVIS_CMD", "Command detected: notifications")
+            if (!isNotificationAccessEnabled()) {
+                speakResponse("Notification access is not enabled. Please enable it in settings.")
+                openNotificationListenerSettings()
+                return true
+            }
+            Log.e("JARVIS_CMD", "Reading latest notifications")
+            speakResponse(NotificationRepository.summarizeLatest(5))
+            return true
+        }
+
         if (handleMemoryCommandInService(lower)) return true
 
         // ── RECIPE CREATION MODE — capture steps ─────────────────────────────
@@ -1819,6 +1871,8 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
                 lower.contains("add event") || lower.contains("remind me") ||
                 lower.contains("weather") || lower.contains("temperature") ||
                 lower.contains("read my") || lower.contains("what's on my") ||
+                lower.contains("research") || lower.contains("report") ||
+                lower.contains("pdf") ||
                 lower.contains("dental") || lower.contains("meeting") ||
                 lower.contains("what do i have") || lower.contains("today's events") ||
                 lower.contains("schedule")
@@ -1881,6 +1935,10 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
 
     private fun shouldForwardToAi(command: String): Boolean {
         val lower = command.lowercase(Locale.getDefault())
+        if (lower.contains("research") ||
+            (lower.contains("report") && (lower.contains("about") || lower.contains("for") || lower.contains("create") || lower.contains("make"))) ||
+            (lower.startsWith("search ") && (lower.contains("pdf") || lower.contains("report") || lower.contains("save")))
+        ) return true
         val commandKeywords = listOf(
             "calendar", "appointment", "schedule", "add event", "meeting", "dental",
             "alarm", "timer", "wake me", "screen", "what do you see", "read my screen",
