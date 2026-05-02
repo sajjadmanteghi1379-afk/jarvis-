@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.asStateFlow
 
 enum class JarvisState {
     IDLE,
+    AWAITING_CMD,
     LISTENING,
     THINKING,
     SPEAKING,
@@ -21,7 +22,8 @@ object JarvisStateManager {
 
     fun setState(state: JarvisState) {
         if (_state.value == state) return
+        val previous = _state.value
         _state.value = state
-        Log.e("JARVIS_CMD", "Jarvis state changed: $state")
+        Log.e("JARVIS_CMD", "Jarvis state changed: $previous -> $state")
     }
 }

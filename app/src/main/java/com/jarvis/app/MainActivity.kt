@@ -125,6 +125,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
     var wakeWordEnabled by mutableStateOf(false)
     private var proactiveMonitor: JarvisProactive? = null
     private val pendingCommand = mutableStateOf<String?>(null)
+    private val pendingServiceMessages = mutableStateOf<List<ChatMessage>>(emptyList())
     private var enrollmentPending by mutableStateOf(false)
     private var speakerVerifier: JarvisSpeakerVerifier? = null
     var speakerVerificationEnabled by mutableStateOf(false)
@@ -152,10 +153,19 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                 }
                 JarvisListenerService.ACTION_WAKE -> {
                     Log.e("JARVIS_CMD", "Wake word received from service")
+                    JarvisStateManager.setState(JarvisState.AWAITING_CMD)
                     playActivationBeep()
                 }
                 JarvisListenerService.ACTION_SLEEP -> {
                     Log.e("JARVIS_CMD", "Sleep word received from service")
+                }
+                JarvisListenerService.ACTION_UI_SPEECH -> {
+                    val text = intent.getStringExtra(JarvisListenerService.EXTRA_TEXT) ?: return
+                    pendingServiceMessages.value = pendingServiceMessages.value + ChatMessage("YOU", text)
+                }
+                JarvisListenerService.ACTION_UI_RESPONSE -> {
+                    val text = intent.getStringExtra(JarvisListenerService.EXTRA_TEXT) ?: return
+                    pendingServiceMessages.value = pendingServiceMessages.value + ChatMessage("JARVIS", text)
                 }
                 ScreenCaptureService.ACTION_RESULT -> {
                     val err = intent.getStringExtra("error")
@@ -245,6 +255,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                 Log.e("JARVIS_CMD", "JarvisMemory init failed: ${e.message}")
             }
             JarvisSettingsStore.init(applicationContext)
+            wakeWordEnabled = JarvisSettingsStore.settings.wakeWordEnabled
+            PersonalityManager.init(applicationContext)
             JarvisStateManager.setState(JarvisState.IDLE)
             setContent { JarvisTheme { JarvisScreen() } }
             try {
@@ -368,10 +380,13 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
 
     override fun onResume() {
         super.onResume()
+        JarvisListenerService.isUiActive = true
         val filter = IntentFilter().apply {
             addAction(JarvisListenerService.ACTION_COMMAND)
             addAction(JarvisListenerService.ACTION_WAKE)
             addAction(JarvisListenerService.ACTION_SLEEP)
+            addAction(JarvisListenerService.ACTION_UI_SPEECH)
+            addAction(JarvisListenerService.ACTION_UI_RESPONSE)
             addAction(ScreenCaptureService.ACTION_RESULT)
             addAction("JARVIS_VISION_RESULT")
         }
@@ -387,6 +402,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
 
     override fun onPause() {
         super.onPause()
+        JarvisListenerService.isUiActive = false
         try { unregisterReceiver(serviceCommandReceiver) } catch (e: Exception) {}
         try { unregisterReceiver(screenCaptureReceiver) } catch (e: Exception) {}
     }
@@ -563,13 +579,14 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
         tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
             override fun onStart(uid: String?) {
                 Log.e("JARVIS_CMD", "TTS started")
+                JarvisStateManager.setState(JarvisState.SPEAKING)
             }
             override fun onDone(uid: String?) {
                 CoroutineScope(Dispatchers.Main).launch {
                     delay(1000)
                     isCurrentlySpeaking = false
                     Log.e("JARVIS_CMD", "TTS stopped")
-                    JarvisStateManager.setState(if (JarvisListenerService.isRunning) JarvisState.BACKGROUND_ACTIVE else JarvisState.IDLE)
+                    JarvisStateManager.setState(JarvisState.IDLE)
                     onDone()
                 }
             }
@@ -615,9 +632,10 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                             try { mediaPlayer?.stop(); mediaPlayer?.release(); mediaPlayer = null } catch (_: Exception) {}
                             mediaPlayer = MediaPlayer().apply {
                                 setDataSource(f.absolutePath); prepare(); start()
+                                JarvisStateManager.setState(JarvisState.SPEAKING)
                                 setOnCompletionListener {
                                     isCurrentlySpeaking = false
-                                    JarvisStateManager.setState(if (JarvisListenerService.isRunning) JarvisState.BACKGROUND_ACTIVE else JarvisState.IDLE)
+                                    JarvisStateManager.setState(JarvisState.IDLE)
                                     onDone()
                                 }
                                 setOnErrorListener { _, _, _ ->
@@ -683,6 +701,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                             val wakeWords = listOf("hey jarvis", "ok jarvis", "jarvis, ", "hey j.a.r.v.i.s")
                             val matched = wakeWords.firstOrNull { l.startsWith(it) }
                             if (matched != null) {
+                                JarvisStateManager.setState(JarvisState.AWAITING_CMD)
                                 val cmd = raw.substring(matched.length).trim()
                                 Log.e("JARVIS_CMD", "WAKE_WORD: detected, cmd='$cmd'")
                                 if (cmd.isNotBlank()) onResult(cmd)
@@ -1233,6 +1252,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
 
             val prompt = """
                 Create a polished professional research report about "$topic".
+                ${PersonalityManager.researchToneInstruction()}
 
                 Web context status: ${if (limitedWebContext) "Limited web context was available, so use your knowledge carefully and state that limitation in the Sources section." else "Use the web context below as supporting material."}
 
@@ -1749,7 +1769,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                             "pc" -> "Research complete. I saved a PDF report to Downloads and synced it to your PC."
                             else -> "Research complete. I saved a PDF report to Downloads."
                         }
-                        speakText(finalMessage) { finishResearchAfterSpeech() }
+                        speakText(PersonalityManager.styleResearchSummary(finalMessage)) { finishResearchAfterSpeech() }
                     }
                 }
             } catch (e: Exception) {
@@ -2751,6 +2771,19 @@ Return ONLY the JSON object, nothing else."""
             }
         }
 
+        LaunchedEffect(pendingServiceMessages.value) {
+            val serviceMessages = pendingServiceMessages.value
+            if (serviceMessages.isNotEmpty()) {
+                serviceMessages.forEach { serviceMessage ->
+                    val last = messages.lastOrNull()
+                    if (last?.role != serviceMessage.role || last.content != serviceMessage.content) {
+                        messages = messages + serviceMessage
+                    }
+                }
+                pendingServiceMessages.value = emptyList()
+            }
+        }
+
         // Trigger enrollment UI when voice enrollment command issued
         LaunchedEffect(enrollmentPending) {
             if (enrollmentPending) {
@@ -2779,6 +2812,7 @@ Return ONLY the JSON object, nothing else."""
         }
 
         val phase = when (jarvisState) {
+            JarvisState.AWAITING_CMD -> "AWAITING CMD"
             JarvisState.LISTENING -> if (wakeWordEnabled) "WAKE WORD" else "LISTENING"
             JarvisState.THINKING -> "PROCESSING"
             JarvisState.SPEAKING -> "SPEAKING"
@@ -2805,7 +2839,9 @@ Return ONLY the JSON object, nothing else."""
                 return
             }
 
-            messages = messages + ChatMessage("YOU", text)
+            if (messages.lastOrNull()?.let { it.role == "YOU" && it.content == text } != true) {
+                messages = messages + ChatMessage("YOU", text)
+            }
             lastCommand = text
             isThinking = true; isSpeaking = false
             JarvisStateManager.setState(JarvisState.THINKING)
@@ -2824,7 +2860,9 @@ Return ONLY the JSON object, nothing else."""
                 }
 
                 var cmdResponse = ""
-                val handled = handleVoiceCommand(text) { r -> cmdResponse = r }
+                val handled = handleVoiceCommand(text) { r ->
+                    cmdResponse = PersonalityManager.styleConfirmation(r)
+                }
 
                 if (handled && cmdResponse.isNotEmpty()) {
                     messages = messages + ChatMessage("JARVIS", cmdResponse)
@@ -2993,6 +3031,7 @@ Return ONLY the JSON object, nothing else."""
 
         val activeStateText = when (jarvisState) {
             JarvisState.IDLE -> "Idle"
+            JarvisState.AWAITING_CMD -> "Awaiting Command"
             JarvisState.LISTENING -> "Listening"
             JarvisState.THINKING -> "Thinking"
             JarvisState.SPEAKING -> "Speaking"
@@ -3000,6 +3039,7 @@ Return ONLY the JSON object, nothing else."""
             JarvisState.ERROR -> "Error"
             JarvisState.BACKGROUND_ACTIVE -> "Background Active"
         }
+        val avatarState = jarvisState.toAvatarState()
         val quickAction: (String) -> Unit = { label ->
             when (label) {
                 "Screen" -> handleUserInput("read my screen")
@@ -3029,7 +3069,7 @@ Return ONLY the JSON object, nothing else."""
             if (isWide) {
                 Row(modifier = Modifier.fillMaxSize()) {
                     Column(
-                        modifier = Modifier.weight(0.55f).fillMaxHeight()
+                        modifier = Modifier.weight(0.3f).fillMaxHeight()
                             .background(Brush.verticalGradient(listOf(
                                 Color(0xFF000D1A), Color(0xFF010810), Color(0xFF000D1A)
                             ))),
@@ -3039,40 +3079,28 @@ Return ONLY the JSON object, nothing else."""
                         Spacer(modifier = Modifier.height(12.dp))
                         Box(modifier = Modifier.fillMaxWidth().height(420.dp),
                             contentAlignment = Alignment.Center) {
-                            ArcReactorMk6(phase = phase, size = 340.dp)
-                            Text(activeStateText, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                            if (settings.avatar.enabled) {
+                                JarvisAvatar(
+                                    state = avatarState,
+                                    settings = settings.avatar,
+                                    modifier = Modifier.fillMaxWidth().height(400.dp).padding(12.dp)
+                                )
+                            } else {
+                                ArcReactorMk6(phase = phase, size = 340.dp)
+                                Text(activeStateText, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
                         WaveformBar(isActive = isListening || isSpeaking,
                             color = phaseColor(phase),
                             modifier = Modifier.fillMaxWidth().height(55.dp).padding(horizontal = 20.dp))
-                        Spacer(modifier = Modifier.height(10.dp))
-                        QuickActionRow(onAction = quickAction)
-                        Spacer(modifier = Modifier.height(10.dp))
-                        StatusGridWide(phase, sessionCount, commandCount)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        MetricPanel(phase)
                         Spacer(modifier = Modifier.weight(1f))
-                        WaveformBar(isActive = isListening || isSpeaking,
-                            color = phaseColor(phase),
-                            modifier = Modifier.fillMaxWidth().height(45.dp).padding(horizontal = 8.dp))
-                        Spacer(modifier = Modifier.height(8.dp))
                     }
                     Box(modifier = Modifier.width(1.dp).fillMaxHeight()
                         .background(Brush.verticalGradient(listOf(
                             Color.Transparent, phaseColor(phase).copy(alpha = 0.9f),
                             phaseColor(phase), phaseColor(phase).copy(alpha = 0.9f), Color.Transparent
                         ))))
-                    Column(modifier = Modifier.weight(0.45f).fillMaxHeight().background(Color(0xFF000810))) {
-                        StatusSidePanel(
-                            phase = phase,
-                            aiStatus = if (settings.aiFallback) "Ready" else "Fallback Off",
-                            backgroundActive = JarvisListenerService.isRunning,
-                            accessibilityEnabled = isAccessibilityEnabled(),
-                            notificationAccess = isNotificationAccessEnabled(),
-                            calendarPermission = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED,
-                            lastCommand = lastCommand,
-                            modifier = Modifier.fillMaxWidth().height(178.dp).padding(8.dp)
-                        )
+                    Column(modifier = Modifier.weight(0.42f).fillMaxHeight().background(Color(0xFF000810))) {
                         ChatHeader(phase)
                         LazyColumn(state = listState,
                             modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 8.dp),
@@ -3088,14 +3116,44 @@ Return ONLY the JSON object, nothing else."""
                                     startListeningInternal({ t -> handleUserInput(t) }, {}) }
                             })
                     }
+                    Box(modifier = Modifier.width(1.dp).fillMaxHeight()
+                        .background(Brush.verticalGradient(listOf(
+                            Color.Transparent, phaseColor(phase).copy(alpha = 0.5f),
+                            phaseColor(phase), phaseColor(phase).copy(alpha = 0.5f), Color.Transparent
+                        ))))
+                    Column(modifier = Modifier.weight(0.28f).fillMaxHeight().background(Color(0xFF000D1A))) {
+                        StatusSidePanel(
+                            phase = phase,
+                            aiStatus = if (settings.aiFallback) "Ready" else "Fallback Off",
+                            backgroundActive = JarvisListenerService.isRunning,
+                            accessibilityEnabled = isAccessibilityEnabled(),
+                            notificationAccess = isNotificationAccessEnabled(),
+                            calendarPermission = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED,
+                            lastCommand = lastCommand,
+                            modifier = Modifier.fillMaxWidth().height(178.dp).padding(8.dp)
+                        )
+                        QuickActionRow(onAction = quickAction)
+                        Spacer(modifier = Modifier.height(10.dp))
+                        StatusGridWide(phase, sessionCount, commandCount)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        MetricPanel(phase)
+                    }
                 }
             } else {
                 Column(modifier = Modifier.fillMaxSize()) {
                     TopBar(currentTime, phase, userName, onSettings = { showSettings = true })
                     Box(modifier = Modifier.fillMaxWidth().height(260.dp),
                         contentAlignment = Alignment.Center) {
-                        ArcReactorMk6(phase = phase, size = 230.dp)
-                        Text(activeStateText, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        if (settings.avatar.enabled) {
+                            JarvisAvatar(
+                                state = avatarState,
+                                settings = settings.avatar,
+                                modifier = Modifier.fillMaxWidth().height(250.dp).padding(horizontal = 10.dp, vertical = 8.dp)
+                            )
+                        } else {
+                            ArcReactorMk6(phase = phase, size = 230.dp)
+                            Text(activeStateText, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                     WaveformBar(isActive = isListening || isSpeaking,
                         color = phaseColor(phase),
@@ -3479,6 +3537,7 @@ Return ONLY the JSON object, nothing else."""
                 ToggleRow("Proactive suggestions", settings.proactiveSuggestions) { JarvisSettingsStore.update { s -> s.copy(proactiveSuggestions = it) } }
             }
             SettingsSection("Voice") {
+                PersonalityModeRow(PersonalityManager.currentMode)
                 SliderRow("TTS speed", settings.ttsSpeed, 0.5f, 1.5f) { value -> JarvisSettingsStore.update { s -> s.copy(ttsSpeed = value) }; if (::tts.isInitialized) tts.setSpeechRate(value) }
                 SliderRow("TTS pitch", settings.ttsPitch, 0.6f, 1.4f) { value -> JarvisSettingsStore.update { s -> s.copy(ttsPitch = value) }; if (::tts.isInitialized) tts.setPitch(value) }
                 ToggleRow("Voice feedback", settings.voiceFeedback) { JarvisSettingsStore.update { s -> s.copy(voiceFeedback = it) } }
@@ -3496,6 +3555,18 @@ Return ONLY the JSON object, nothing else."""
                 SliderRow("HUD opacity", settings.hud.opacity, 0.25f, 1f) { JarvisSettingsStore.update { s -> s.copy(hud = s.hud.copy(opacity = it)) } }
                 SliderRow("HUD size", settings.hud.size, 0.6f, 1.4f) { JarvisSettingsStore.update { s -> s.copy(hud = s.hud.copy(size = it)) } }
                 SliderRow("Animation intensity", settings.hud.animationIntensity, 0f, 1f) { JarvisSettingsStore.update { s -> s.copy(hud = s.hud.copy(animationIntensity = it)) } }
+            }
+            SettingsSection("Avatar") {
+                ToggleRow("Avatar enabled", settings.avatar.enabled) { enabled ->
+                    JarvisSettingsStore.update { s -> s.copy(avatar = s.avatar.copy(enabled = enabled)) }
+                }
+                AvatarStyleRow(settings.avatar.style)
+                SliderRow("Avatar animation intensity", settings.avatar.animationIntensity, 0f, 1f) {
+                    JarvisSettingsStore.update { s -> s.copy(avatar = s.avatar.copy(animationIntensity = it)) }
+                }
+                ToggleRow("Voice-reactive effects", settings.avatar.voiceReactive) { enabled ->
+                    JarvisSettingsStore.update { s -> s.copy(avatar = s.avatar.copy(voiceReactive = enabled)) }
+                }
             }
             SettingsSection("Privacy") {
                 ToggleRow("Screen vision", settings.screenVision) { JarvisSettingsStore.update { s -> s.copy(screenVision = it) } }
@@ -3553,6 +3624,46 @@ Return ONLY the JSON object, nothing else."""
                     onClick = { JarvisSettingsStore.update { s -> s.copy(researchMode = mode) } },
                     label = { Text(mode) }
                 )
+            }
+        }
+    }
+
+    @Composable
+    fun PersonalityModeRow(current: PersonalityMode) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Personality: ${current.displayName}", color = Color.White, fontSize = 13.sp)
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                PersonalityMode.values().forEach { mode ->
+                    FilterChip(
+                        selected = current == mode,
+                        onClick = { PersonalityManager.setMode(mode) },
+                        label = { Text(mode.displayName) }
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun AvatarStyleRow(current: AvatarStyle) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Avatar style: ${current.displayName}", color = Color.White, fontSize = 13.sp)
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                AvatarStyle.values().forEach { style ->
+                    FilterChip(
+                        selected = current == style,
+                        onClick = {
+                            JarvisSettingsStore.update { s -> s.copy(avatar = s.avatar.copy(style = style)) }
+                        },
+                        label = { Text(style.displayName) }
+                    )
+                }
             }
         }
     }
@@ -3953,6 +4064,7 @@ Return ONLY the JSON object, nothing else."""
             val systemPrompt = """You are Jarvis, Tony Stark's highly intelligent AI assistant.
 You are running on the Android phone of $name, a $field student at $university in $location, age 24.
 Personality: dry British wit, sophisticated, loyal, occasionally sarcastic but always helpful.
+${PersonalityManager.aiPromptInstruction()}
 Response style: concise 1-3 sentences max for voice. No bullet points. No markdown. No asterisks.
 Signature phrases: Indeed sir, Quite right, Certainly, As you wish, Noted, Rather impressive.
 Supported languages: English and Farsi. If user writes in Farsi, respond in Farsi script.
