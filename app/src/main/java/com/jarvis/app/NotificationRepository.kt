@@ -18,7 +18,9 @@ object NotificationRepository {
     fun add(notification: JarvisNotification) = synchronized(lock) {
         recent.add(notification)
         while (recent.size > MAX_RECENT) recent.removeAt(0)
-        Log.e("JARVIS_CMD", "Notifications stored: ${recent.size}")
+        if (recent.size == 1 || recent.size % 5 == 0) {
+            Log.e("JARVIS_CMD", "Notifications stored: ${recent.size}")
+        }
     }
 
     fun latest(limit: Int): List<JarvisNotification> = synchronized(lock) {
@@ -43,6 +45,9 @@ object NotificationRepository {
         val normalized = lower.trim().trimEnd('?', '.', '!')
         return normalized == "read my notifications" ||
             normalized == "read notifications" ||
+            normalized == "read my notification" ||
+            normalized == "show my notifications" ||
+            normalized == "check notifications" ||
             normalized == "what are my notifications" ||
             normalized == "summarize notifications" ||
             normalized == "summarise notifications"
@@ -53,7 +58,7 @@ object NotificationRepository {
         if (items.isEmpty()) return "You have no recent notifications."
         val parts = items.mapIndexed { index, item ->
             val title = item.title.ifBlank { item.appName }
-            val text = item.text.ifBlank { "No message text" }
+            val text = item.text.ifBlank { "No message text" }.take(120)
             "${index + 1}. ${item.appName}: $title - $text"
         }
         return "Here are your latest ${items.size} notification${if (items.size == 1) "" else "s"}. ${parts.joinToString(". ")}."

@@ -13,6 +13,7 @@ class VoskManager(private val context: Context) {
     private var model: Model? = null
     private var speechService: SpeechService? = null
     private var callback: ((String) -> Unit)? = null
+    private var errorCallback: ((String) -> Unit)? = null
     private var initialized = false
     private var startWhenReady = false
 
@@ -29,7 +30,7 @@ class VoskManager(private val context: Context) {
                 Log.e("JARVIS_CMD", "Vosk model loaded")
                 if (startWhenReady) {
                     startWhenReady = false
-                    callback?.let { startListening(it) }
+                    callback?.let { startListening(it, errorCallback) }
                 }
             },
             { exception ->
@@ -39,8 +40,9 @@ class VoskManager(private val context: Context) {
         )
     }
 
-    fun startListening(callback: (String) -> Unit) {
+    fun startListening(callback: (String) -> Unit, onRecoverableError: ((String) -> Unit)? = null) {
         this.callback = callback
+        this.errorCallback = onRecoverableError
         val currentModel = model
         if (currentModel == null) {
             startWhenReady = true
@@ -67,10 +69,14 @@ class VoskManager(private val context: Context) {
 
                     override fun onError(exception: Exception?) {
                         Log.e("JARVIS_CMD", "Vosk recognition error: ${exception?.message}", exception)
+                        stopListening()
+                        errorCallback?.invoke(exception?.message ?: "Vosk recognition error")
                     }
 
                     override fun onTimeout() {
                         Log.e("JARVIS_CMD", "Vosk recognition timeout")
+                        stopListening()
+                        errorCallback?.invoke("Vosk recognition timeout")
                     }
                 })
             }

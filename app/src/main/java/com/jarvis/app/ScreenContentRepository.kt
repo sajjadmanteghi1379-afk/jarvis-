@@ -79,6 +79,15 @@ object ScreenContentRepository {
     }
 }
 
+object ScreenContextStore {
+    var latestScreenText: String
+        get() = ScreenContentRepository.current().text
+        set(value) = ScreenContentRepository.update(value)
+
+    val latestUpdatedAt: Long
+        get() = ScreenContentRepository.current().capturedAtMs
+}
+
 data class ScreenContentSnapshot(
     val text: String = "",
     val packageName: String = "",

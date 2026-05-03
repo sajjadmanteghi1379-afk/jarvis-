@@ -488,8 +488,7 @@ DECISION RULES:
     private suspend fun captureScreen(): String = withContext(Dispatchers.Main) {
         val screenSummary = ScreenContentRepository.currentSummary()
         if (screenSummary.isNotBlank()) {
-            Log.e("JARVIS_CMD", "Raw screen text: ${ScreenContentRepository.currentText().take(1000)}")
-            return@withContext "$screenSummary\nRaw screen text is available in debug logs."
+            return@withContext screenSummary
         }
         val deferred = CompletableDeferred<String>()
         host.launchScreenCapture { result ->
