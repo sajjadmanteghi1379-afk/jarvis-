@@ -71,7 +71,7 @@ import kotlin.math.*
 import kotlin.system.exitProcess
 
 
-const val ANTHROPIC_API_KEY = "REMOVED"
+const val ANTHROPIC_API_KEY = ""
 const val ELEVENLABS_API_KEY = "DISABLED"
 const val ELEVENLABS_VOICE_ID = "pNInz6obpgDQGcFmaJgB"
 const val FIREBASE_PATH = "/jarvis"
