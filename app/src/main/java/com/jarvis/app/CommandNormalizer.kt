@@ -7,10 +7,16 @@ object CommandNormalizer {
     private val phraseCorrections = listOf(
         "what's up" to "whatsapp",
         "whats up" to "whatsapp",
+        "what s up" to "whatsapp",
+        "what is up" to "whatsapp",
         "what sup" to "whatsapp",
         "whatsap" to "whatsapp",
+        "watsapp" to "whatsapp",
         "what app" to "whatsapp",
+        "whats app" to "whatsapp",
+        "what's app" to "whatsapp",
         "whatsup" to "whatsapp",
+        "واتساپ" to "whatsapp",
         "a spotify" to "spotify",
         "spot if i" to "spotify",
         "spotty fly" to "spotify",
@@ -59,6 +65,7 @@ object CommandNormalizer {
         text = text
             .replace(Regex("\\b(open|launch|start)\\s+(a|an|the)\\s+"), "$1 ")
             .replace(Regex("\\b(open|launch)\\s+whatsapp\\b"), "open whatsapp")
+            .replace(Regex("\\b(open|launch|start)\\s+whatsapp\\b"), "$1 whatsapp")
             .replace(Regex("\\b(open|launch)\\s+spotify\\b"), "open spotify")
             .replace(Regex("\\s+"), " ")
             .trim()

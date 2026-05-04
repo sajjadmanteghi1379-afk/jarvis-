@@ -8,6 +8,14 @@ object CommandRouter {
 
     val appAliases: Map<String, AppRoute> = mapOf(
         "whatsapp" to AppRoute("WhatsApp", listOf("com.whatsapp")),
+        "whats app" to AppRoute("WhatsApp", listOf("com.whatsapp")),
+        "what s up" to AppRoute("WhatsApp", listOf("com.whatsapp")),
+        "whats up" to AppRoute("WhatsApp", listOf("com.whatsapp")),
+        "whatsup" to AppRoute("WhatsApp", listOf("com.whatsapp")),
+        "watsapp" to AppRoute("WhatsApp", listOf("com.whatsapp")),
+        "واتساپ" to AppRoute("WhatsApp", listOf("com.whatsapp")),
+        "instagram" to AppRoute("Instagram", listOf("com.instagram.android")),
+        "insta" to AppRoute("Instagram", listOf("com.instagram.android")),
         "telegram" to AppRoute("Telegram", listOf("org.telegram.messenger")),
         "spotify" to AppRoute("Spotify", listOf("com.spotify.music")),
         "chrome" to AppRoute("Chrome", listOf("com.android.chrome")),

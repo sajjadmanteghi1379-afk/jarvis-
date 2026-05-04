@@ -136,6 +136,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
     private var screenCaptureCallback: ((String) -> Unit)? = null
     private var pendingYesNoCallback: ((Boolean) -> Unit)? = null
     private var pendingCalendarDraft: CalendarEventDraft? = null
+    private var lastNotificationAccessLoggedValue: Boolean? = null
+    private var lastNotificationAccessLogMs = 0L
 
     private val screenCaptureReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -328,7 +330,12 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
             Log.e("JARVIS_CMD", "Notification listener check failed: ${e.message}")
             false
         }
-        Log.e("JARVIS_CMD", "Notification access enabled: $enabled")
+        val now = System.currentTimeMillis()
+        if (lastNotificationAccessLoggedValue != enabled || now - lastNotificationAccessLogMs >= 30_000L) {
+            Log.e("JARVIS_CMD", "Notification access enabled: $enabled")
+            lastNotificationAccessLoggedValue = enabled
+            lastNotificationAccessLogMs = now
+        }
         return enabled
     }
 
@@ -729,20 +736,29 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                     if (!matches.isNullOrEmpty() && matches[0].isNotBlank()) {
                         val raw = matches[0]
                         val normalized = normalizeSpeech(raw)
-                        Log.e("JARVIS_CMD", "Recognizer result raw='$raw' normalized='$normalized'")
+                        Log.e("JARVIS_CMD", "RECOGNIZED source=ANDROID_STT raw='$raw' normalized='$normalized' state='${JarvisStateManager.state.value}'")
                         if (wakeWordEnabled && continuousListening) {
-                            val wake = SpeechWake.extractCommand(raw)
-                            Log.e("JARVIS_CMD", "WAKE_WORD: detected=${wake.detected} phrase='${wake.phrase}' command='${wake.command}'")
+                            val wake = SpeechWake.parse(raw)
+                            Log.e("JARVIS_CMD", "WAKE_PARSE detected=${wake.detected} phrase='${wake.phrase}' command='${wake.command}' wakeOnly=${wake.wakeOnly} conversationActive=false")
                             if (wake.detected) {
                                 JarvisStateManager.setState(JarvisState.AWAITING_CMD)
                                 val cmd = wake.command
-                                if (cmd.isNotBlank()) onResult(cmd)
+                                if (cmd.isNotBlank()) {
+                                    if (CommandDeduplicator.shouldIgnore(RecognitionSource.ANDROID_STT, cmd)) {
+                                        Log.e("JARVIS_CMD", "COMMAND_DECISION action=IGNORE_DUPLICATE")
+                                    } else {
+                                        Log.e("JARVIS_CMD", "COMMAND_DECISION action=ROUTE_COMMAND")
+                                        onResult(cmd)
+                                    }
+                                }
                                 else if (continuousListening) CoroutineScope(Dispatchers.Main).launch {
-                                    speakText("I'm listening") {
+                                    Log.e("JARVIS_CMD", "COMMAND_DECISION action=ACTIVATE_WAKE")
+                                    speakText("Yes, sir?") {
                                         if (continuousListening) startListeningInternal(onResult, onError)
                                     }
                                 }
                             } else {
+                                Log.e("JARVIS_CMD", "COMMAND_DECISION action=IGNORE_WAKE_REQUIRED")
                                 Log.e("JARVIS_CMD", "WAKE_WORD: no wake word in '$normalized', ignoring")
                                 if (continuousListening) CoroutineScope(Dispatchers.Main).launch {
                                     delay(700); if (continuousListening) startListeningInternal(onResult, onError)
@@ -750,7 +766,12 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
                             }
                         } else {
                             activityFatalRecognizerErrors = 0
-                            onResult(raw)
+                            if (CommandDeduplicator.shouldIgnore(RecognitionSource.ANDROID_STT, normalized)) {
+                                Log.e("JARVIS_CMD", "COMMAND_DECISION action=IGNORE_DUPLICATE")
+                            } else {
+                                Log.e("JARVIS_CMD", "COMMAND_DECISION action=ROUTE_COMMAND")
+                                onResult(raw)
+                            }
                         }
                     } else if (continuousListening) CoroutineScope(Dispatchers.Main).launch {
                         delay(700); if (continuousListening) startListeningInternal(onResult, onError)
@@ -931,6 +952,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener, AgentHost
         } else {
             "I couldn't find ${route.displayName} installed, sir."
         }
+        Log.e("JARVIS_CMD", "APP_ROUTER result opened=$opened")
         Log.e("JARVIS_CMD", "APP_ROUTER result app='${route.displayName}' package='$matchedPackage' opened=$opened")
         JarvisDiagnostics.actionResult(result)
         onResponse(result)

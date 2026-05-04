@@ -68,6 +68,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
     private var isStartingListening = false
     private var isMuted = false
     private var earlyExecuted = false
+    private var restartOnDestroy = true
     private val scope = CoroutineScope(Dispatchers.Main)
     private val audioManager by lazy { getSystemService(AUDIO_SERVICE) as AudioManager }
     private var originalSystemVolume = 0
@@ -102,6 +103,8 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
     private var consecutiveErrors = 0
     private var lastConsecutiveErrorTime = 0L
     private var lastRecognizerResumeLogMs = 0L
+    private var lastNotificationAccessLoggedValue: Boolean? = null
+    private var lastNotificationAccessLogMs = 0L
 
     // ─── Notification announcement bookkeeping ─────────────────────────────
     private var lastNotificationAnnounceMs: Long = 0L
@@ -113,6 +116,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
     private var isAwaitingCommand = false
     private var awaitingCommandUntil = 0L
     private var awaitingCommandTimeout: Job? = null
+    private var suppressNextConversationRestart = false
 
     // ─── Recipe creation mode bookkeeping ─────────────────────────────────
     private var recipeCreationMode: Boolean = false
@@ -218,6 +222,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
         }
         if (!JarvisSettingsStore.settings.backgroundActive) {
             Log.e("JARVIS_CMD", "Service stopping: backgroundActive=false")
+            restartOnDestroy = false
             stopSelf()
             return
         }
@@ -309,7 +314,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
             when (intent?.action) {
-                "STOP" -> { isRunning = false; isServiceRunning = false; stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
+                "STOP" -> { restartOnDestroy = false; isRunning = false; isServiceRunning = false; stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
                 ACTION_SLEEP -> {
                     isAwake = false
                     updateNotification("Listening for 'Hey Jarvis'...", false)
@@ -381,8 +386,10 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
         try { notificationReceiver?.let { unregisterReceiver(it) } } catch (_: Exception) {}
         notificationReceiver = null
         scope.cancel()
-        Log.e("JARVIS_CMD", "Service destroyed — restarting")
-        sendBroadcast(Intent("com.jarvis.app.RESTART_SERVICE").apply { `package` = packageName })
+        Log.e("JARVIS_CMD", if (restartOnDestroy && JarvisSettingsStore.settings.backgroundActive) "Service destroyed - restarting" else "Service destroyed")
+        if (restartOnDestroy && JarvisSettingsStore.settings.backgroundActive) {
+            sendBroadcast(Intent("com.jarvis.app.RESTART_SERVICE").apply { `package` = packageName })
+        }
     }
 
     // ─── Speech recognizer (created ONCE, never recreated in loop) ──────────
@@ -425,17 +432,11 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
                     scope.launch {
                         isStartingListening = false
                         val text = recognized.trim()
-                        val normalized = normalizeSpeech(text)
-                        Log.e("JARVIS_CMD", "Service heard raw='$text' normalized='$normalized' state=$voiceMode")
                         if (isResearching) {
                             Log.e("JARVIS_CMD", "Ignoring Vosk result while research is running")
                             return@launch
                         }
-                        if (isSpeaking || (!isAwaitingCommand && System.currentTimeMillis() - ttsEndTime < 2000)) {
-                            Log.e("JARVIS_CMD", "Ignoring Vosk result while speaking or cooling down")
-                            return@launch
-                        }
-                        processResult(text)
+                        handleRecognizedText(RecognitionSource.VOSK, text)
                         if (isRunning && !isSpeaking && !isResearching) {
                             isListening = true
                             if (!isAwaitingCommand) JarvisStateManager.setState(JarvisState.LISTENING)
@@ -586,7 +587,10 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
                     JarvisStateManager.setState(if (resumeMode == VoiceMode.COMMAND_LISTENING) JarvisState.AWAITING_CMD else JarvisState.IDLE)
                     Log.e("JARVIS_CMD", "TTS stopped")
                     onDone()
-                    if (JarvisSettingsStore.settings.conversationMode) startConversationMode()
+                    if (JarvisSettingsStore.settings.conversationMode && !suppressNextConversationRestart) {
+                        startConversationMode()
+                    }
+                    suppressNextConversationRestart = false
                     if (!isListening && isRunning && !isResearching) startListening(resumeMode, "TTS done")
                 }, 1000)
             }
@@ -597,6 +601,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
                     JarvisStateManager.setState(JarvisState.ERROR)
                     Log.e("JARVIS_CMD", "TTS stopped")
                     onDone()
+                    suppressNextConversationRestart = false
                     restartListeningLater("TTS error", 1000L, resumeMode)
                 }
             }
@@ -707,6 +712,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
         } else {
             "I couldn't find ${route.displayName} installed, sir."
         }
+        Log.e("JARVIS_CMD", "APP_ROUTER result opened=$opened")
         Log.e("JARVIS_CMD", "APP_ROUTER result app='${route.displayName}' package='$matchedPackage' opened=$opened")
         JarvisDiagnostics.actionResult(result)
         speakResponse(result)
@@ -736,7 +742,12 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
             Log.e("JARVIS_CMD", "Notification listener check failed: ${e.message}")
             false
         }
-        Log.e("JARVIS_CMD", "Notification access enabled: $enabled")
+        val now = System.currentTimeMillis()
+        if (lastNotificationAccessLoggedValue != enabled || now - lastNotificationAccessLogMs >= 30_000L) {
+            Log.e("JARVIS_CMD", "Notification access enabled: $enabled")
+            lastNotificationAccessLoggedValue = enabled
+            lastNotificationAccessLogMs = now
+        }
         return enabled
     }
 
@@ -925,6 +936,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
             CommandIntent.StopListening -> {
                 endConversationMode()
                 JarvisDiagnostics.actionResult("Listening paused")
+                suppressNextConversationRestart = true
                 speakResponse("Listening paused, sir.")
                 true
             }
@@ -935,7 +947,13 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
                 executeCommandInService("what's on my calendar today")
                 true
             }
-            CommandIntent.Goodbye,
+            CommandIntent.Goodbye -> {
+                endConversationMode()
+                JarvisDiagnostics.actionResult("Conversation ended")
+                suppressNextConversationRestart = true
+                speakThenWake("Goodbye, sir.")
+                true
+            }
             is CommandIntent.Unknown -> false
         }
     }
@@ -1866,21 +1884,17 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
         "Ù‡ÛŒ Ø¬Ø§Ø±ÙˆÛŒØ³"
     ).sortedByDescending { it.length }
 
-    private fun extractCommand(lower: String): Pair<Boolean, String> {
-        val match = SpeechWake.extractCommand(lower)
-        Log.e("JARVIS_CMD", "Wake parse normalized='${normalizeSpeech(lower)}' detected=${match.detected} phrase='${match.phrase}' command='${match.command}'")
-        return match.detected to match.command.ifBlank { normalizeSpeech(lower) }
-    }
+    private fun parseWake(raw: String): WakeParse = SpeechWake.parse(raw)
 
     private fun openAwaitingCommandWindow() {
         isAwake = true
         conversationActive = true
         isAwaitingCommand = true
         JarvisStateManager.setState(JarvisState.AWAITING_CMD)
-        awaitingCommandUntil = System.currentTimeMillis() + 10_000L
+        awaitingCommandUntil = System.currentTimeMillis() + 30_000L
         awaitingCommandTimeout?.cancel()
         awaitingCommandTimeout = scope.launch {
-            delay(10_000L)
+            delay(30_000L)
             if (isAwaitingCommand && System.currentTimeMillis() >= awaitingCommandUntil) {
                 isAwaitingCommand = false
                 conversationActive = false
@@ -1893,7 +1907,7 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
         JarvisAvatarController.onWakeWord(applicationContext, JarvisSettingsStore.settings)
         sendBroadcast(Intent(ACTION_WAKE).apply { `package` = packageName })
         Log.e("JARVIS_CMD", "WAKE_WORD: wake detected, awaiting command")
-        speakThenListen("I'm listening")
+        speakThenListen("Yes, sir?")
     }
 
     private fun closeAwaitingCommandWindow() {
@@ -1903,23 +1917,43 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
         awaitingCommandTimeout = null
     }
 
+    private var currentRecognitionSource: RecognitionSource = RecognitionSource.VOSK
+
+    private fun handleRecognizedText(source: RecognitionSource, rawText: String) {
+        val raw = rawText.trim()
+        val normalized = normalizeSpeech(raw)
+        Log.e("JARVIS_CMD", "RECOGNIZED source=$source raw='$raw' normalized='$normalized' state='$voiceMode'")
+        currentRecognitionSource = source
+        processResult(raw)
+    }
+
     private fun processResult(text: String) {
         if (text.isBlank()) return
+        val lower = normalizeSpeech(text)
+        val now = System.currentTimeMillis()
+        val wake = parseWake(lower)
+        Log.e("JARVIS_CMD", "WAKE_PARSE detected=${wake.detected} phrase='${wake.phrase}' command='${wake.command}' wakeOnly=${wake.wakeOnly} conversationActive=$conversationActive")
+        if (isSpeaking || now - ttsEndTime in 0L..1500L) {
+            Log.e("JARVIS_CMD", "COMMAND_DECISION action=IGNORE_TTS_ECHO")
+            Log.e("JARVIS_CMD", "Ignored during TTS/post-TTS grace")
+            return
+        }
         if (isSpeaking) {
             Log.e("JARVIS_CMD", "Ignoring input while speaking: '$text'")
             return
         }
-        val lower = normalizeSpeech(text)
         Log.e("JARVIS_CMD", "Process result state=$voiceMode normalized='$lower'")
 
         // ── TTS fingerprint echo check (layer 2)
         if (JarvisSettingsStore.settings.ttsEchoProtection && !isAwaitingCommand && isSelfVoice(lower)) {
-            Log.e("JARVIS_CMD", "TTS fingerprint echo rejected: '$lower'")
+            Log.e("JARVIS_CMD", "COMMAND_DECISION action=IGNORE_TTS_ECHO")
+            Log.e("JARVIS_CMD", "Ignored during TTS/post-TTS grace")
             return
         }
         // ── Post-TTS lockout: reject long phrases within 1500ms of TTS ending (layer 3)
         if (JarvisSettingsStore.settings.ttsEchoProtection && !isAwaitingCommand && lower.split(" ").size > 4 && System.currentTimeMillis() - ttsEndTime < 1500L) {
-            Log.e("JARVIS_CMD", "Post-TTS echo rejected: '$lower'")
+            Log.e("JARVIS_CMD", "COMMAND_DECISION action=IGNORE_TTS_ECHO")
+            Log.e("JARVIS_CMD", "Ignored during TTS/post-TTS grace")
             return
         }
 
@@ -1933,11 +1967,11 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
             "flashlight on", "flashlight off"
         )
         if (JarvisSettingsStore.settings.ttsEchoProtection && selfVoicePhrases.any { lower.contains(it) }) {
-            Log.e("JARVIS_CMD", "Self-voice feedback ignored: '$lower'")
+            Log.e("JARVIS_CMD", "COMMAND_DECISION action=IGNORE_TTS_ECHO")
+            Log.e("JARVIS_CMD", "Ignored during TTS/post-TTS grace")
             return
         }
 
-        val now = System.currentTimeMillis()
         if (isAwaitingCommand && now >= awaitingCommandUntil) {
             closeAwaitingCommandWindow()
             conversationActive = false
@@ -1945,28 +1979,34 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
             Log.e("JARVIS_CMD", "WAKE_WORD: command window expired")
         }
 
-        val (hadWakeWord, extractedCommand) = extractCommand(lower)
-        val usingAwaitingCommand = !hadWakeWord && isAwaitingCommand && now < awaitingCommandUntil
-        var command = when {
+        val usingAwaitingCommand = !wake.detected && (conversationActive || (isAwaitingCommand && now < awaitingCommandUntil))
+        val command = when {
             usingAwaitingCommand -> lower
-            hadWakeWord -> extractedCommand
-            else -> lower
+            wake.detected -> wake.command
+            !JarvisSettingsStore.settings.wakeWordEnabled -> lower
+            else -> ""
         }.trim()
 
         if (usingAwaitingCommand) {
             Log.e("JARVIS_CMD", "WAKE_WORD: using awaiting command='$command'")
         }
 
-        if (hadWakeWord && command.length >= 2) {
+        if (wake.detected && command.length >= 2) {
             Log.e("JARVIS_CMD", "WAKE_WORD: one-shot command='$command'")
         }
 
-        if (hadWakeWord && command.length < 2) {
+        if (wake.detected && wake.wakeOnly) {
+            Log.e("JARVIS_CMD", "COMMAND_DECISION action=ACTIVATE_WAKE")
             openAwaitingCommandWindow()
             return
         }
 
-        if (JarvisSettingsStore.settings.wakeWordEnabled && !hadWakeWord && !usingAwaitingCommand) {
+        if (JarvisSettingsStore.settings.wakeWordEnabled && !wake.detected && !usingAwaitingCommand) {
+            Log.e("JARVIS_CMD", "COMMAND_DECISION action=IGNORE_WAKE_REQUIRED")
+            return
+        }
+
+        if (!JarvisSettingsStore.settings.wakeWordEnabled && !wake.detected && !usingAwaitingCommand) {
             val isRecipeCreationPhrase = recipeCreationMode && (
                 lower.startsWith("step ") || lower == "save recipe" ||
                 lower == "save my recipe" || lower == "save it" ||
@@ -1992,20 +2032,28 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
                 lower.contains("what do i have") || lower.contains("today's events") ||
                 lower.contains("schedule")
             if (!isClearCommand && !isRecipeCreationPhrase && !conversationActive) {
+                Log.e("JARVIS_CMD", "COMMAND_DECISION action=IGNORE_WAKE_REQUIRED")
                 Log.e("JARVIS_CMD", "No wake word, not a clear command, ignoring: '$lower'")
                 return
             }
         }
 
-        if (!hadWakeWord && !usingAwaitingCommand && pendingCalendarDraft == null &&
+        if (!wake.detected && !usingAwaitingCommand && pendingCalendarDraft == null &&
             lastCommandTimestamp > 0 && now - lastCommandTimestamp < 4000L
         ) {
+            Log.e("JARVIS_CMD", "COMMAND_DECISION action=IGNORE_DUPLICATE")
             Log.e("JARVIS_CMD", "Post-command lockout (${now - lastCommandTimestamp}ms) - ignoring: '$lower'")
             return
         }
 
         if (command == lastCommandText && now - lastCommandTimestamp < 5000L) {
+            Log.e("JARVIS_CMD", "COMMAND_DECISION action=IGNORE_DUPLICATE")
             Log.e("JARVIS_CMD", "Duplicate command ignored: $command")
+            return
+        }
+
+        if (CommandDeduplicator.shouldIgnore(currentRecognitionSource, command, now)) {
+            Log.e("JARVIS_CMD", "COMMAND_DECISION action=IGNORE_DUPLICATE")
             return
         }
 
@@ -2015,11 +2063,22 @@ class JarvisListenerService : Service(), TextToSpeech.OnInitListener {
         }
 
         if (command.isBlank() || command.length < 2) {
+            Log.e("JARVIS_CMD", "COMMAND_DECISION action=ACTIVATE_WAKE")
             openAwaitingCommandWindow()
             return
         }
 
+        if (command.contains("goodbye jarvis") || (command == "goodbye" && (conversationActive || wake.detected))) {
+            Log.e("JARVIS_CMD", "COMMAND_DECISION action=ROUTE_COMMAND")
+            endConversationMode()
+            closeAwaitingCommandWindow()
+            suppressNextConversationRestart = true
+            speakThenWake("Goodbye, sir.")
+            return
+        }
+
         closeAwaitingCommandWindow()
+        Log.e("JARVIS_CMD", "COMMAND_DECISION action=ROUTE_COMMAND")
         voiceMode = VoiceMode.PROCESSING_COMMAND
         JarvisStateManager.setState(JarvisState.THINKING)
         sendUiMessage(ACTION_UI_SPEECH, command)

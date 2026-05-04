@@ -9,6 +9,8 @@ import android.view.accessibility.AccessibilityNodeInfo
 open class MyAccessibilityService : AccessibilityService() {
 
     private var lastCaptureTime = 0L
+    private var lastLoggedCaptureLength = 0
+    private var lastCaptureLogTime = 0L
 
     companion object {
         private const val TAG = "JARVIS_CMD"
@@ -62,7 +64,13 @@ open class MyAccessibilityService : AccessibilityService() {
             val captured = parts.joinToString("\n").trim()
             if (captured.isNotEmpty()) {
                 ScreenContentRepository.update(captured, event.packageName?.toString())
-                Log.e(TAG, "Accessibility captured ${captured.length} chars")
+                if (kotlin.math.abs(captured.length - lastLoggedCaptureLength) >= 120 ||
+                    now - lastCaptureLogTime >= 10_000L
+                ) {
+                    Log.e(TAG, "Accessibility captured ${captured.length} chars")
+                    lastLoggedCaptureLength = captured.length
+                    lastCaptureLogTime = now
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Accessibility capture failed: ${e.message}", e)
